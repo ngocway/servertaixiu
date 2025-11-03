@@ -1,0 +1,1236 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Color Extractor - Lấy màu từ vị trí cố định</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        
+        .header p {
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .step-section {
+            margin-bottom: 30px;
+            padding: 25px;
+            border-radius: 10px;
+            border-left: 5px solid #ff6b6b;
+            background: #f8f9fa;
+        }
+        
+        .step-title {
+            color: #2c3e50;
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            font-weight: bold;
+        }
+        
+        .upload-area {
+            text-align: center;
+            padding: 20px;
+            border: 2px dashed #ddd;
+            border-radius: 10px;
+            background: white;
+            margin: 15px 0;
+        }
+        
+        .file-input {
+            display: none;
+        }
+        
+        .upload-btn {
+            background: linear-gradient(135deg, #4ecdc4, #44a08d);
+            color: white;
+            padding: 12px 25px;
+            border: none;
+            border-radius: 20px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 5px;
+        }
+        
+        .upload-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 15px rgba(78, 205, 196, 0.3);
+        }
+        
+        .analyze-btn {
+            background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 25px;
+            font-size: 1.1em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 10px;
+            display: none;
+        }
+        
+        .analyze-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(255, 107, 107, 0.3);
+        }
+        
+        .image-preview {
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 10px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+            margin: 15px 0;
+        }
+        
+        .images-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .image-container {
+            text-align: center;
+        }
+        
+        .image-label {
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+        
+        .results-section {
+            margin-top: 30px;
+            padding: 25px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            display: none;
+        }
+        
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin: 10px 0 20px 0;
+            justify-content: center;
+        }
+        .tab-btn {
+            background: #e0e7ff;
+            color: #1f2937;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 999px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .tab-btn.active {
+            background: linear-gradient(135deg, #4ecdc4, #44a08d);
+            color: white;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+        }
+        
+        .results-title {
+            color: #2c3e50;
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .results-table th {
+            background: linear-gradient(135deg, #4ecdc4, #44a08d);
+            color: white;
+            padding: 15px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 1.1em;
+        }
+        
+        .results-table td {
+            padding: 12px 15px;
+            text-align: center;
+            border-bottom: 1px solid #ecf0f1;
+        }
+        
+        .results-table tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .results-table tr:nth-child(even) {
+            background: #f8f9fa;
+        }
+        
+        .results-table tr:hover {
+            background: #e8f5e8;
+        }
+        
+        .position-cell {
+            font-weight: bold;
+            color: #ff6b6b;
+            font-size: 1.1em;
+        }
+        
+        .classification-cell {
+            font-weight: bold;
+            font-size: 1.1em;
+            padding: 8px 16px;
+            border-radius: 20px;
+            display: inline-block;
+            min-width: 80px;
+        }
+        
+        .classification-white {
+            background: #000000;
+            color: #ffffff;
+        }
+        
+        .classification-black {
+            background: #000000;
+            color: #ffffff;
+        }
+        
+        .canvas-container {
+            text-align: center;
+            margin: 20px 0;
+        }
+        
+        .extraction-canvas {
+            border: 2px solid #4ecdc4;
+            border-radius: 10px;
+            max-width: 100%;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+        }
+        
+        .stats {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #ecf0f1;
+        }
+        
+        .stat-item:last-child {
+            border-bottom: none;
+        }
+        
+        .stat-label {
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        
+        .stat-value {
+            color: #4ecdc4;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .download-btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            padding: 12px 25px;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 1em;
+            margin: 10px;
+            transition: all 0.3s ease;
+        }
+        
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 15px rgba(102, 126, 234, 0.3);
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #4ecdc4;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border-left: 4px solid #c62828;
+        }
+        
+        .success {
+            background: #e8f5e8;
+            color: #2e7d32;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border-left: 4px solid #2e7d32;
+        }
+        
+        .step-indicator {
+            display: flex;
+            justify-content: center;
+            margin: 20px 0;
+        }
+        
+        .step {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: #ddd;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 10px;
+            font-weight: bold;
+        }
+        
+        .step.active {
+            background: #4ecdc4;
+        }
+        
+        .step.completed {
+            background: #2e7d32;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎨 Color Extractor</h1>
+            <p>Lấy màu từ vị trí cố định dựa trên ảnh mẫu</p>
+        </div>
+        
+        <div class="content">
+            <div class="tabs">
+                <button class="tab-btn active" id="tabBtnMain" onclick="switchTabView('main')">🔵 Phân tích theo nốt xanh</button>
+                <button class="tab-btn" id="tabBtnHistory" onclick="switchTabView('history')">🗂️ Lịch sử kết quả</button>
+            </div>
+
+            <div id="tab-main" style="display: block;">
+            <div class="step-indicator">
+                <div class="step" id="step1">1</div>
+                <div class="step" id="step2">2</div>
+                <div class="step" id="step3">3</div>
+            </div>
+            
+            
+            <!-- Bước 1: Upload ảnh mẫu -->
+            <div class="step-section">
+                <div class="step-title">📸 Bước 1: Upload ảnh mẫu (chứa nốt xanh lá #1AFF0D)</div>
+                <div class="upload-area">
+                    <input type="file" id="templateInput" class="file-input" accept="image/*">
+                    <button class="upload-btn" onclick="document.getElementById('templateInput').click()">
+                        📁 Chọn ảnh mẫu
+                    </button>
+                </div>
+                <div id="templatePreview"></div>
+            </div>
+            
+            <!-- Bước 2: Upload ảnh A -->
+            <div class="step-section">
+                <div class="step-title">🖼️ Bước 2: Upload ảnh A (ảnh cần lấy màu)</div>
+                <div class="upload-area">
+                    <input type="file" id="targetInput" class="file-input" accept="image/*">
+                    <button class="upload-btn" onclick="document.getElementById('targetInput').click()">
+                        📁 Chọn ảnh A
+                    </button>
+                </div>
+                <div id="targetPreview"></div>
+            </div>
+            
+            <!-- Bước 3: Phân tích -->
+            <div class="step-section">
+                <div class="step-title">🔍 Bước 3: Phân tích và lấy màu</div>
+                <div style="text-align: center;">
+                    <button class="analyze-btn" id="analyzeBtn" onclick="extractColors()">
+                        🎨 Lấy màu từ vị trí
+                    </button>
+                </div>
+            </div>
+            
+            
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>Đang phân tích và lấy màu...</p>
+            </div>
+            
+            <div class="results-section" id="resultsSection">
+                <h3 class="results-title">🎨 Kết quả lấy màu</h3>
+                
+                <div class="images-container">
+                    <div class="image-container">
+                        <div class="image-label">Ảnh mẫu (vị trí nốt xanh lá #1AFF0D)</div>
+                        <canvas id="templateCanvas" class="extraction-canvas"></canvas>
+                    </div>
+                    <div class="image-container">
+                        <div class="image-label">Ảnh A (màu thực tế)</div>
+                        <canvas id="targetCanvas" class="extraction-canvas"></canvas>
+                    </div>
+                </div>
+                
+                <table class="results-table" id="resultsTable">
+                    <thead>
+                        <tr>
+                            <th>Vị trí</th>
+                            <th>Phân loại</th>
+                        </tr>
+                    </thead>
+                    <tbody id="colorTableBody">
+                    </tbody>
+                </table>
+                
+                <div class="stats" id="stats"></div>
+                
+                <div style="text-align: center;">
+                    <button class="download-btn" onclick="downloadResults()">💾 Tải kết quả JSON</button>
+                    <button class="download-btn" onclick="downloadColors()">⚫⚪ Tải kết quả Trắng/Đen</button>
+                </div>
+            </div>
+            </div> <!-- end tab-main -->
+
+            <div id="tab-history" style="display: none;">
+                <div class="step-section">
+                    <div class="step-title">🗂️ Lịch sử file kết quả đã tải lên</div>
+                    <div style="text-align:center;">
+                        <button class="download-btn" onclick="loadHistory()">🔄 Tải danh sách</button>
+                    </div>
+                    <table class="results-table">
+                        <thead>
+                            <tr>
+                                <th>Tên file</th>
+                                <th>Kích thước (bytes)</th>
+                                <th>Số mục</th>
+                                <th>Thời gian</th>
+                                <th>Hành động</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyTableBody"></tbody>
+                    </table>
+                </div>
+            </div> <!-- end tab-history -->
+        </div>
+    </div>
+
+    <script>
+        let templateImage = null;
+        let targetImage = null;
+        let templateDots = [];
+        let extractedColors = [];
+        let templateCanvas = null;
+        let targetCanvas = null;
+        let templateCtx = null;
+        let targetCtx = null;
+        // Dữ liệu cho chức năng phân tích theo tọa độ
+        let coordList = [];
+        let compareImage = null;
+        let compareCanvas = null;
+        let compareCtx = null;
+
+        // Cấu hình phát hiện màu xanh lá sáng #1AFF0D
+        const GREEN_DETECTION_CONFIG = {
+            greenMin: [20, 200, 10],    // R >= 20, G >= 200, B >= 10
+            greenMax: [30, 255, 20],    // R <= 30, G <= 255, B <= 20
+            minArea: 20,
+            minDistance: 30,
+            minBrightness: 50
+        };
+
+        document.getElementById('templateInput').addEventListener('change', (e) => handleTemplateFile(e));
+        document.getElementById('targetInput').addEventListener('change', (e) => handleTargetFile(e));
+        const coordsJsonInputEl = document.getElementById('coordsJsonInput');
+        const compareImageInputEl = document.getElementById('compareImageInput');
+        if (coordsJsonInputEl) coordsJsonInputEl.addEventListener('change', (e) => handleCoordsJson(e));
+        if (compareImageInputEl) compareImageInputEl.addEventListener('change', (e) => handleCompareImage(e));
+
+        function handleTemplateFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.onload = function() {
+                    templateImage = img;
+                    displayTemplatePreview(img);
+                    updateStepIndicator(1, true);
+                    checkReadyToAnalyze();
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function handleTargetFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.onload = function() {
+                    targetImage = img;
+                    displayTargetPreview(img);
+                    updateStepIndicator(2, true);
+                    checkReadyToAnalyze();
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function displayTemplatePreview(img) {
+            const preview = document.getElementById('templatePreview');
+            preview.innerHTML = `
+                <img src="${img.src}" class="image-preview" alt="Ảnh mẫu">
+                <p style="text-align: center; color: #666; margin-top: 10px;">
+                    Kích thước: ${img.width} x ${img.height} pixels
+                </p>
+            `;
+        }
+
+        function displayTargetPreview(img) {
+            const preview = document.getElementById('targetPreview');
+            preview.innerHTML = `
+                <img src="${img.src}" class="image-preview" alt="Ảnh A">
+                <p style="text-align: center; color: #666; margin-top: 10px;">
+                    Kích thước: ${img.width} x ${img.height} pixels
+                </p>
+            `;
+        }
+
+        function updateStepIndicator(step, completed) {
+            const stepElement = document.getElementById(`step${step}`);
+            if (completed) {
+                stepElement.classList.add('completed');
+                stepElement.classList.remove('active');
+            } else {
+                stepElement.classList.add('active');
+                stepElement.classList.remove('completed');
+            }
+        }
+
+        function checkReadyToAnalyze() {
+            if (templateImage && targetImage) {
+                document.getElementById('analyzeBtn').style.display = 'inline-block';
+                updateStepIndicator(3, false);
+            }
+            // Bật nút phân tích theo tọa độ khi đã có JSON và ảnh
+            if (coordList.length > 0 && compareImage) {
+                const btn = document.getElementById('analyzeCoordsBtn');
+                if (btn) btn.style.display = 'inline-block';
+            }
+        }
+
+        function switchTab(tab) {
+            const pixel = document.getElementById('tab-pixel');
+            const json = document.getElementById('tab-json');
+            const btnPixel = document.getElementById('tabBtnPixel');
+            const btnJson = document.getElementById('tabBtnJson');
+            if (!pixel || !json || !btnPixel || !btnJson) return;
+            if (tab === 'json') {
+                pixel.style.display = 'none';
+                json.style.display = 'block';
+                btnPixel.classList.remove('active');
+                btnJson.classList.add('active');
+            } else {
+                json.style.display = 'none';
+                pixel.style.display = 'block';
+                btnJson.classList.remove('active');
+                btnPixel.classList.add('active');
+            }
+        }
+
+        function handleCoordsJson(event) {
+            const file = event.target.files && event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const text = e.target.result;
+                    const data = JSON.parse(text);
+                    // Hỗ trợ 2 format: [{x:10,y:20}, ...] hoặc [[10,20], ...]
+                    const parsed = Array.isArray(data) ? data.map((item) => {
+                        if (Array.isArray(item) && item.length >= 2) {
+                            return { x: Number(item[0]), y: Number(item[1]) };
+                        }
+                        if (item && typeof item === 'object' && 'x' in item && 'y' in item) {
+                            return { x: Number(item.x), y: Number(item.y) };
+                        }
+                        return null;
+                    }).filter(Boolean) : [];
+                    coordList = parsed;
+                    showMessage(`📄 Đã nạp ${coordList.length} tọa độ từ JSON`, 'success');
+                    renderJsonPreview();
+                    checkReadyToAnalyze();
+                } catch (err) {
+                    showMessage('❌ JSON không hợp lệ. Vui lòng kiểm tra lại.', 'error');
+                }
+            };
+            reader.readAsText(file, 'utf-8');
+        }
+
+        function handleCompareImage(event) {
+            const file = event.target.files && event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.onload = function() {
+                    compareImage = img;
+                    showMessage(`🖼️ Ảnh cần so sánh: ${img.width} x ${img.height}`, 'success');
+                    renderJsonPreview();
+                    checkReadyToAnalyze();
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function renderJsonPreview() {
+            // Cập nhật bảng tọa độ
+            const tbody = document.getElementById('coordsTableBody');
+            if (tbody) {
+                tbody.innerHTML = (coordList || []).map((c, i) => `
+                    <tr><td>${i + 1}</td><td>${c.x}</td><td>${c.y}</td></tr>
+                `).join('');
+            }
+            // Vẽ ảnh và đánh dấu điểm nếu có ảnh
+            if (compareImage) {
+                const canvas = document.getElementById('comparePreviewCanvas');
+                if (canvas) {
+                    const ctx = canvas.getContext('2d');
+                    canvas.width = compareImage.width;
+                    canvas.height = compareImage.height;
+                    ctx.drawImage(compareImage, 0, 0);
+                    // Vẽ các điểm
+                    ctx.lineWidth = 2;
+                    ctx.strokeStyle = '#4ecdc4';
+                    ctx.fillStyle = '#4ecdc4';
+                    (coordList || []).forEach((pt, idx) => {
+                        ctx.beginPath();
+                        ctx.arc(pt.x, pt.y, 6, 0, Math.PI * 2);
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.arc(pt.x, pt.y, 3, 0, Math.PI * 2);
+                        ctx.fill();
+                    });
+                }
+            }
+        }
+
+        function analyzeByCoordinates() {
+            if (coordList.length === 0 || !compareImage) {
+                showMessage('⚠️ Vui lòng chọn file JSON tọa độ và ảnh cần so sánh.', 'error');
+                return;
+            }
+            showLoading(true);
+            // Chuẩn bị canvas làm việc tạm
+            if (!compareCanvas) {
+                compareCanvas = document.createElement('canvas');
+                compareCtx = compareCanvas.getContext('2d');
+            }
+            compareCanvas.width = compareImage.width;
+            compareCanvas.height = compareImage.height;
+            compareCtx.drawImage(compareImage, 0, 0);
+            const imgData = compareCtx.getImageData(0, 0, compareCanvas.width, compareCanvas.height);
+            const pixels = imgData.data;
+            const width = compareCanvas.width;
+            const height = compareCanvas.height;
+
+            // Tạo kết quả theo định dạng extractedColors để tái sử dụng UI
+            extractedColors = coordList.map((coord, idx) => {
+                const { r, g, b } = sampleAveragedRGB(pixels, width, height, Math.round(coord.x), Math.round(coord.y), 2);
+                const cls = classifyColorAsBlackOrWhite(r, g, b);
+                return {
+                    number: idx + 1,
+                    x: Math.round(coord.x),
+                    y: Math.round(coord.y),
+                    rgb: { r, g, b },
+                    hex: rgbToHex(r, g, b),
+                    hsl: rgbToHsl(r, g, b),
+                    alpha: 255,
+                    classification: cls.classification,
+                    confidence: cls.confidence,
+                    brightness: cls.brightness
+                };
+            });
+
+            // Hiển thị kết quả trong bảng sẵn có
+            displayColorResults();
+            showLoading(false);
+        }
+
+        function sampleAveragedRGB(pixels, width, height, cx, cy, radius) {
+            let sumR = 0, sumG = 0, sumB = 0, count = 0;
+            for (let dy = -radius; dy <= radius; dy++) {
+                for (let dx = -radius; dx <= radius; dx++) {
+                    const x = cx + dx;
+                    const y = cy + dy;
+                    if (x >= 0 && x < width && y >= 0 && y < height) {
+                        const idx = (y * width + x) * 4;
+                        sumR += pixels[idx];
+                        sumG += pixels[idx + 1];
+                        sumB += pixels[idx + 2];
+                        count++;
+                    }
+                }
+            }
+            if (count === 0) return { r: 0, g: 0, b: 0 };
+            return {
+                r: Math.round(sumR / count),
+                g: Math.round(sumG / count),
+                b: Math.round(sumB / count)
+            };
+        }
+
+        function extractColors() {
+            if (!templateImage || !targetImage) return;
+
+            showLoading(true);
+            
+            // Khởi tạo canvas
+            templateCanvas = document.getElementById('templateCanvas');
+            targetCanvas = document.getElementById('targetCanvas');
+            templateCtx = templateCanvas.getContext('2d');
+            targetCtx = targetCanvas.getContext('2d');
+            
+            // Đặt kích thước canvas
+            templateCanvas.width = templateImage.width;
+            templateCanvas.height = templateImage.height;
+            targetCanvas.width = targetImage.width;
+            targetCanvas.height = targetImage.height;
+            
+            // Vẽ ảnh lên canvas
+            templateCtx.drawImage(templateImage, 0, 0);
+            targetCtx.drawImage(targetImage, 0, 0);
+            
+            // Phát hiện vị trí nốt xanh lá trong ảnh mẫu
+            const templateImageData = templateCtx.getImageData(0, 0, templateCanvas.width, templateCanvas.height);
+            templateDots = detectGreenDots(templateImageData.data, templateCanvas.width, templateCanvas.height);
+            
+            // Lấy màu từ ảnh A tại các vị trí tương ứng
+            const targetImageData = targetCtx.getImageData(0, 0, targetCanvas.width, targetCanvas.height);
+            extractedColors = extractColorsAtPositions(targetImageData, templateDots);
+            
+            // Vẽ kết quả
+            drawTemplateResults();
+            drawTargetResults();
+            
+            // Hiển thị kết quả
+            displayColorResults();
+            
+            showLoading(false);
+            updateStepIndicator(3, true);
+        }
+
+        function detectGreenDots(pixels, width, height) {
+            const dots = [];
+            const visited = new Array(width * height).fill(false);
+            
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const index = (y * width + x) * 4;
+                    const r = pixels[index];
+                    const g = pixels[index + 1];
+                    const b = pixels[index + 2];
+                    const a = pixels[index + 3];
+                    
+                    if (a < 128) continue;
+                    
+                    if (isGreenColor(r, g, b)) {
+                        const pixelIndex = y * width + x;
+                        if (!visited[pixelIndex]) {
+                            const region = findConnectedRegion(pixels, width, height, x, y, visited);
+                            if (region.area >= GREEN_DETECTION_CONFIG.minArea) {
+                                const centerX = region.centerX;
+                                const centerY = region.centerY;
+                                
+                                const tooClose = dots.some(dot => 
+                                    Math.sqrt((dot.x - centerX) ** 2 + (dot.y - centerY) ** 2) < GREEN_DETECTION_CONFIG.minDistance
+                                );
+                                
+                                if (!tooClose) {
+                                    dots.push({
+                                        x: Math.round(centerX),
+                                        y: Math.round(centerY),
+                                        area: region.area
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Sắp xếp kiểu ziczac: từ phải qua trái cho hàng đầu, sau đó trái qua phải cho hàng kế
+            return orderDotsZigzag(dots);
+        }
+
+        // Sắp xếp điểm theo hàng (y) và ziczac theo x, bắt đầu từ phải qua trái
+        function orderDotsZigzag(dots) {
+            if (!dots || dots.length === 0) return [];
+            // Sắp xếp sơ bộ theo y tăng dần rồi x tăng dần
+            const sorted = [...dots].sort((a, b) => {
+                if (Math.abs(a.y - b.y) < 1e-6) return a.x - b.x;
+                return a.y - b.y;
+            });
+            const rowThreshold = 20; // cùng một hàng nếu gần nhau trong khoảng này
+            const rows = [];
+            let currentRow = [];
+            let currentY = sorted[0].y;
+            for (const d of sorted) {
+                if (Math.abs(d.y - currentY) <= rowThreshold) {
+                    currentRow.push(d);
+                } else {
+                    rows.push(currentRow);
+                    currentRow = [d];
+                    currentY = d.y;
+                }
+            }
+            if (currentRow.length) rows.push(currentRow);
+
+            // Với mỗi hàng: hàng 0 (trên cùng) sắp x theo giảm dần (phải -> trái),
+            // hàng 1 sắp x tăng dần (trái -> phải), … lần lượt ziczac
+            const result = [];
+            rows.forEach((row, idx) => {
+                row.sort((a, b) => a.x - b.x);
+                if (idx % 2 === 0) {
+                    // phải -> trái
+                    for (let i = row.length - 1; i >= 0; i--) result.push(row[i]);
+                } else {
+                    // trái -> phải
+                    for (let i = 0; i < row.length; i++) result.push(row[i]);
+                }
+            });
+            return result;
+        }
+
+        function isGreenColor(r, g, b) {
+            const [minR, minG, minB] = GREEN_DETECTION_CONFIG.greenMin;
+            const [maxR, maxG, maxB] = GREEN_DETECTION_CONFIG.greenMax;
+            
+            return r >= minR && r <= maxR && 
+                   g >= minG && g <= maxG && 
+                   b >= minB && b <= maxB;
+        }
+
+        function findConnectedRegion(pixels, width, height, startX, startY, visited) {
+            const stack = [{x: startX, y: startY}];
+            const region = {
+                pixels: [],
+                area: 0,
+                centerX: 0, centerY: 0
+            };
+            
+            while (stack.length > 0) {
+                const {x, y} = stack.pop();
+                const pixelIndex = y * width + x;
+                
+                if (x < 0 || x >= width || y < 0 || y >= height || visited[pixelIndex]) {
+                    continue;
+                }
+                
+                const index = pixelIndex * 4;
+                const r = pixels[index];
+                const g = pixels[index + 1];
+                const b = pixels[index + 2];
+                const a = pixels[index + 3];
+                
+                if (a < 128 || !isGreenColor(r, g, b)) {
+                    continue;
+                }
+                
+                visited[pixelIndex] = true;
+                region.pixels.push({x, y});
+                region.area++;
+                region.centerX += x;
+                region.centerY += y;
+                
+                for (let dy = -1; dy <= 1; dy++) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        stack.push({x: x + dx, y: y + dy});
+                    }
+                }
+            }
+            
+            if (region.area > 0) {
+                region.centerX /= region.area;
+                region.centerY /= region.area;
+            }
+            
+            return region;
+        }
+
+        function extractColorsAtPositions(targetImageData, positions) {
+            const colors = [];
+            const pixels = targetImageData.data;
+            const width = targetCanvas.width;
+            const height = targetCanvas.height;
+            
+            positions.forEach((pos, index) => {
+                // Lấy màu tại vị trí tương ứng trong ảnh A
+                const x = Math.round(pos.x);
+                const y = Math.round(pos.y);
+                
+                // Đảm bảo vị trí trong phạm vi ảnh
+                if (x >= 0 && x < width && y >= 0 && y < height) {
+                    const pixelIndex = (y * width + x) * 4;
+                    const r = pixels[pixelIndex];
+                    const g = pixels[pixelIndex + 1];
+                    const b = pixels[pixelIndex + 2];
+                    const a = pixels[pixelIndex + 3];
+                    
+                    const hex = rgbToHex(r, g, b);
+                    const hsl = rgbToHsl(r, g, b);
+                    
+                    // Phân loại màu thành trắng hoặc đen
+                    const classification = classifyColorAsBlackOrWhite(r, g, b);
+                    
+                    colors.push({
+                        number: index + 1,
+                        x: x,
+                        y: y,
+                        rgb: {r, g, b},
+                        hex: hex,
+                        hsl: hsl,
+                        alpha: a,
+                        classification: classification.classification,
+                        confidence: classification.confidence,
+                        brightness: classification.brightness
+                    });
+                }
+            });
+            
+            return colors;
+        }
+
+        function rgbToHex(r, g, b) {
+            return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1).toUpperCase();
+        }
+
+        function rgbToHsl(r, g, b) {
+            r /= 255;
+            g /= 255;
+            b /= 255;
+            
+            const max = Math.max(r, g, b);
+            const min = Math.min(r, g, b);
+            let h, s, l = (max + min) / 2;
+            
+            if (max === min) {
+                h = s = 0;
+            } else {
+                const d = max - min;
+                s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+                
+                switch (max) {
+                    case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                    case g: h = (b - r) / d + 2; break;
+                    case b: h = (r - g) / d + 4; break;
+                }
+                h /= 6;
+            }
+            
+            return {
+                h: Math.round(h * 360),
+                s: Math.round(s * 100),
+                l: Math.round(l * 100)
+            };
+        }
+
+        function classifyColorAsBlackOrWhite(r, g, b) {
+            // Tính độ sáng (brightness) sử dụng công thức luminance
+            // Luminance = 0.299*R + 0.587*G + 0.114*B
+            const brightness = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+            
+            // Ngưỡng phân loại: < 128 = đen, >= 128 = trắng
+            const threshold = 128;
+            const classification = brightness < threshold ? 'ĐEN' : 'TRẮNG';
+            
+            // Tính độ tin cậy dựa trên khoảng cách từ ngưỡng
+            const distanceFromThreshold = Math.abs(brightness - threshold);
+            const confidence = Math.round(Math.max(0, 100 - (distanceFromThreshold / 128) * 100));
+            
+            return {
+                classification: classification,
+                confidence: confidence,
+                brightness: brightness
+            };
+        }
+
+        function drawTemplateResults() {
+            // Vẽ lại ảnh mẫu
+            templateCtx.drawImage(templateImage, 0, 0);
+            
+            // Vẽ các nốt xanh lá đã phát hiện
+            templateDots.forEach((dot, index) => {
+                templateCtx.strokeStyle = '#1AFF0D';
+                templateCtx.lineWidth = 3;
+                templateCtx.beginPath();
+                templateCtx.arc(dot.x, dot.y, 15, 0, 2 * Math.PI);
+                templateCtx.stroke();
+                
+                templateCtx.fillStyle = '#1AFF0D';
+                templateCtx.font = 'bold 14px Arial';
+                templateCtx.textAlign = 'center';
+                templateCtx.fillText((index + 1).toString(), dot.x, dot.y + 5);
+            });
+        }
+
+        function drawTargetResults() {
+            // Vẽ lại ảnh A
+            targetCtx.drawImage(targetImage, 0, 0);
+            
+            // Vẽ các vị trí đã lấy màu
+            extractedColors.forEach((color, index) => {
+                // Vẽ vòng tròn
+                targetCtx.strokeStyle = '#4ecdc4';
+                targetCtx.lineWidth = 3;
+                targetCtx.beginPath();
+                targetCtx.arc(color.x, color.y, 15, 0, 2 * Math.PI);
+                targetCtx.stroke();
+                
+                // Vẽ số thứ tự
+                targetCtx.fillStyle = '#4ecdc4';
+                targetCtx.font = 'bold 14px Arial';
+                targetCtx.textAlign = 'center';
+                targetCtx.fillText((index + 1).toString(), color.x, color.y + 5);
+                
+                // Vẽ màu thực tế
+                targetCtx.fillStyle = color.hex;
+                targetCtx.beginPath();
+                targetCtx.arc(color.x, color.y, 8, 0, 2 * Math.PI);
+                targetCtx.fill();
+            });
+        }
+
+        function displayColorResults() {
+            const resultsSection = document.getElementById('resultsSection');
+            const colorTableBody = document.getElementById('colorTableBody');
+            const stats = document.getElementById('stats');
+            
+            // Hiển thị bảng kết quả đơn giản
+            colorTableBody.innerHTML = extractedColors.map(color => `
+                <tr>
+                    <td class="position-cell">${color.number}</td>
+                    <td>
+                        <span class="classification-cell ${color.classification === 'TRẮNG' ? 'classification-white' : 'classification-black'}">
+                            ${color.classification}
+                        </span>
+                    </td>
+                </tr>
+            `).join('');
+            
+            // Hiển thị thống kê đơn giản
+            const totalColors = extractedColors.length;
+            const whiteCount = extractedColors.filter(c => c.classification === 'TRẮNG').length;
+            const blackCount = extractedColors.filter(c => c.classification === 'ĐEN').length;
+            
+            stats.innerHTML = `
+                <div class="stat-item">
+                    <span class="stat-label">Tổng số vị trí:</span>
+                    <span class="stat-value">${totalColors}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Màu trắng:</span>
+                    <span class="stat-value">${whiteCount} (${totalColors > 0 ? Math.round(whiteCount/totalColors*100) : 0}%)</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Màu đen:</span>
+                    <span class="stat-value">${blackCount} (${totalColors > 0 ? Math.round(blackCount/totalColors*100) : 0}%)</span>
+                </div>
+            `;
+            
+            resultsSection.style.display = 'block';
+            
+            if (totalColors > 0) {
+                showMessage(`✅ Phân tích thành công ${totalColors} vị trí! Trắng: ${whiteCount}, Đen: ${blackCount}`, 'success');
+            } else {
+                showMessage('⚠️ Không lấy được màu nào. Kiểm tra lại ảnh mẫu (có nốt xanh lá #1AFF0D) và ảnh A.', 'error');
+            }
+        }
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        function showMessage(message, type) {
+            const existingMessage = document.querySelector('.error, .success');
+            if (existingMessage) {
+                existingMessage.remove();
+            }
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = type;
+            messageDiv.textContent = message;
+            // Insert message right before results section if possible; otherwise prepend to current tab
+            const anchor = document.getElementById('resultsSection');
+            if (anchor && anchor.parentNode) {
+                anchor.parentNode.insertBefore(messageDiv, anchor);
+            } else {
+                // Fallback to tab container or content
+                const tabMain = document.getElementById('tab-main');
+                const parent = tabMain || document.querySelector('.content');
+                parent.insertBefore(messageDiv, parent.firstChild);
+            }
+        }
+
+        function switchTabView(tab) {
+            const main = document.getElementById('tab-main');
+            const history = document.getElementById('tab-history');
+            const btnMain = document.getElementById('tabBtnMain');
+            const btnHistory = document.getElementById('tabBtnHistory');
+            if (!main || !history || !btnMain || !btnHistory) return;
+            if (tab === 'history') {
+                main.style.display = 'none';
+                history.style.display = 'block';
+                btnMain.classList.remove('active');
+                btnHistory.classList.add('active');
+                loadHistory();
+            } else {
+                history.style.display = 'none';
+                main.style.display = 'block';
+                btnHistory.classList.remove('active');
+                btnMain.classList.add('active');
+            }
+        }
+
+        async function loadHistory() {
+            try {
+                const res = await fetch('http://localhost:8000/results/black-white');
+                if (!res.ok) throw new Error('Không tải được danh sách');
+                const data = await res.json();
+                const tbody = document.getElementById('historyTableBody');
+                const items = (data && data.items) ? data.items : [];
+                tbody.innerHTML = items.map(it => {
+                    const dt = new Date((it.mtime || 0) * 1000);
+                    const timeStr = dt.toLocaleString();
+                    const href = `http://localhost:8000/results/black-white/${it.filename}`;
+                    return `
+                        <tr>
+                            <td>${it.filename}</td>
+                            <td>${it.size ?? ''}</td>
+                            <td>${it.count ?? ''}</td>
+                            <td>${timeStr}</td>
+                            <td><a href="${href}" target="_blank">Tải/ Xem</a></td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (e) {
+                showMessage('❌ Lỗi tải lịch sử: ' + e.message, 'error');
+            }
+        }
+
+        function downloadResults() {
+            const data = {
+                templateImage: {
+                    width: templateImage.width,
+                    height: templateImage.height,
+                    detectedDots: templateDots.length
+                },
+                targetImage: {
+                    width: targetImage.width,
+                    height: targetImage.height
+                },
+                extractedColors: extractedColors,
+                totalColors: extractedColors.length,
+                extractionTime: new Date().toISOString()
+            };
+            
+            const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'extracted_colors.json';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        async function downloadColors() {
+            const colorData = extractedColors.map(color => ({
+                vị_trí: color.number,
+                phân_loại: color.classification
+            }));
+
+            try {
+                const res = await fetch('http://localhost:8000/results/black-white', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(colorData)
+                });
+                if (!res.ok) {
+                    throw new Error('Server trả về lỗi: ' + res.status);
+                }
+                const data = await res.json();
+                showMessage(`✅ Đã đẩy kết quả lên server (saved: ${data.file}, ${data.count} mục)`, 'success');
+            } catch (err) {
+                showMessage('❌ Lỗi khi đẩy kết quả lên server: ' + err.message, 'error');
+            }
+        }
+    </script>
+</body>
+</html>
