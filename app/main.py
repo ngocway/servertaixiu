@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Request, Form
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -13,6 +13,13 @@ from datetime import datetime
 
 from fastapi.middleware.cors import CORSMiddleware
 
+# Load environment variables from .env file if exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from .services.green_detector import (
     detect_green_dots,
     extract_colors_at_positions,
@@ -21,6 +28,7 @@ from .services.green_detector import (
 from .services.log_service import LogService
 from .services.template_service import TemplateService
 from .services.settings_service import SettingsService
+from .services.pixel_detector_service import PixelDetectorService
 
 # Import config (optional)
 try:
@@ -71,6 +79,7 @@ app.add_middleware(
 log_service = LogService()
 template_service = TemplateService()
 settings_service = SettingsService()
+pixel_detector_service = PixelDetectorService()
 
 
 # ==================== EXCEPTION HANDLERS - ĐẢM BẢO CORS HEADERS CHO TẤT CẢ ERRORS ====================
@@ -1066,6 +1075,564 @@ async def get_betting_method():
     }
 
 
+# ==================== PIXEL DETECTOR API ====================
+
+@app.post("/api/pixel-detector/upload-template")
+async def upload_pixel_template(
+    file: UploadFile = File(...),
+    name: str = Query(..., description="Tên template")
+):
+    """
+    Upload ảnh mẫu, detect pixel màu #1AFF0D và lưu vào database
+    """
+    try:
+        # Read image
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+        
+        # Detect pixels with color #1AFF0D
+        pixel_positions = pixel_detector_service.detect_color_pixels(image)
+        
+        if not pixel_positions:
+            raise HTTPException(
+                status_code=400,
+                detail="Không tìm thấy pixel nào có màu #1AFF0D trong ảnh"
+            )
+        
+        # Save template to database
+        template_id = pixel_detector_service.save_template(name, image, pixel_positions)
+        
+        return {
+            "success": True,
+            "template_id": template_id,
+            "template_name": name,
+            "pixel_count": len(pixel_positions),
+            "image_size": {
+                "width": image.width,
+                "height": image.height
+            },
+            "pixel_positions": [{"x": x, "y": y, "position_number": idx} for idx, (x, y) in enumerate(pixel_positions, 1)],
+            "message": f"Đã phát hiện và lưu {len(pixel_positions)} pixel màu #1AFF0D"
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi xử lý ảnh: {str(e)}")
+
+
+@app.post("/api/pixel-detector/analyze")
+async def analyze_with_pixel_template(
+    file: UploadFile = File(...),
+    region_width: int = Query(100, description="Chiều rộng vùng cần đọc"),
+    region_height: int = Query(40, description="Chiều cao vùng cần đọc")
+):
+    """
+    Upload ảnh cần phân tích và đọc nội dung tại các vị trí pixel đã lưu
+    """
+    try:
+        # Get active template
+        template = pixel_detector_service.get_active_template()
+        if not template:
+            raise HTTPException(
+                status_code=404,
+                detail="Chưa có template nào được tạo. Vui lòng upload template trước."
+            )
+        
+        # Read image
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+        
+        # Analyze image with template
+        results = pixel_detector_service.analyze_image_with_template(
+            image, 
+            template["id"],
+            region_width,
+            region_height
+        )
+        
+        # Save analysis result
+        analysis_id = pixel_detector_service.save_analysis_result(
+            template["id"],
+            results,
+            file.filename
+        )
+        
+        return {
+            "success": True,
+            "analysis_id": analysis_id,
+            "template_id": template["id"],
+            "template_name": template["name"],
+            "total_positions": len(results),
+            "results": results,
+            "message": f"Đã phân tích {len(results)} vị trí"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi phân tích ảnh: {str(e)}")
+
+
+@app.post("/upload/mobile")
+async def upload_from_mobile(request: Request):
+    """
+    API cho Mobile App - Upload ảnh và nhận kết quả thống kê pixel sáng/tối
+    Hỗ trợ cả file binary và Base64 string (từ Geelerk)
+    - Form-data field 'file': File binary (Encode as Base64 = No) hoặc Base64 string (Encode as Base64 = Yes)
+    Lưu ảnh để có thể review lại sau
+    """
+    try:
+        # Get active template
+        template = pixel_detector_service.get_active_template()
+        if not template:
+            raise HTTPException(
+                status_code=404,
+                detail="Chưa có template. Vui lòng upload template trước."
+            )
+        
+        # Xử lý ảnh - hỗ trợ cả file binary và Base64 string
+        image = None
+        image_data = None
+        
+        # Đọc form-data (Geelerk gửi qua form-data)
+        try:
+            form_data = await request.form()
+            
+            # Thử đọc field "file"
+            if 'file' in form_data:
+                file_value = form_data['file']
+                
+                # Trường hợp 1: Base64 string (khi Geelerk Encode as Base64 = Yes)
+                if isinstance(file_value, str) and len(file_value) > 100:
+                    try:
+                        import base64
+                        # Loại bỏ data URL prefix nếu có (data:image/png;base64,...)
+                        base64_data = file_value
+                        if ',' in base64_data:
+                            base64_data = base64_data.split(',')[1]
+                        else:
+                            base64_data = base64_data.strip()
+                        image_data = base64.b64decode(base64_data)
+                        image = Image.open(io.BytesIO(image_data))
+                    except Exception as e:
+                        # Không phải Base64 hợp lệ
+                        pass
+                
+                # Trường hợp 2: UploadFile object (khi Geelerk Encode as Base64 = No)
+                elif hasattr(file_value, 'read'):
+                    try:
+                        image_data = await file_value.read()
+                        if image_data and len(image_data) > 0:
+                            image = Image.open(io.BytesIO(image_data))
+                    except Exception as e:
+                        raise HTTPException(status_code=400, detail=f"Không thể đọc file: {str(e)}")
+        except Exception as e:
+            # Nếu không phải form-data, thử đọc như raw body
+            try:
+                body = await request.body()
+                if body and len(body) > 0:
+                    # Thử parse như ảnh binary trực tiếp
+                    image = Image.open(io.BytesIO(body))
+            except:
+                pass
+        
+        if not image:
+            raise HTTPException(
+                status_code=400,
+                detail="Không nhận được ảnh hợp lệ. Vui lòng gửi file binary hoặc Base64 string trong field 'file' (form-data)"
+            )
+        
+        # Tạo thư mục lưu ảnh mobile nếu chưa có
+        mobile_images_dir = "mobile_images"
+        os.makedirs(mobile_images_dir, exist_ok=True)
+        
+        # Tạo tên file với timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        # Lấy extension từ image format, mặc định là jpg
+        file_extension = image.format.lower() if image.format else 'jpg'
+        if file_extension not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+            file_extension = 'jpg'
+        saved_filename = f"mobile_{timestamp}.{file_extension}"
+        saved_path = os.path.join(mobile_images_dir, saved_filename)
+        
+        # Lưu ảnh
+        image.save(saved_path, quality=95)
+        
+        # Analyze image with template (sử dụng giá trị mặc định)
+        results = pixel_detector_service.analyze_image_with_template(
+            image, 
+            template["id"],
+            region_width=100,
+            region_height=40
+        )
+        
+        # Tính thống kê
+        light_count = sum(1 for r in results if r.get('result') == 'Sáng')
+        dark_count = sum(1 for r in results if r.get('result') == 'Tối')
+        
+        # Save analysis result với đường dẫn ảnh
+        analysis_id = pixel_detector_service.save_analysis_result(
+            template["id"],
+            results,
+            saved_path
+        )
+        
+        # Cleanup: Xóa các record cũ, chỉ giữ lại 10 mới nhất
+        pixel_detector_service.cleanup_old_analyses(keep_count=10)
+        
+        return {
+            "success": True,
+            "analysis_id": analysis_id,
+            "template_id": template["id"],
+            "template_name": template["name"],
+            "total_positions": len(results),
+            "statistics": {
+                "light_pixels": light_count,
+                "dark_pixels": dark_count
+            },
+            "image_path": saved_path,
+            "image_url": f"/api/pixel-detector/image/{analysis_id}",
+            "message": f"Phân tích thành công: {light_count} sáng, {dark_count} tối"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi phân tích: {str(e)}")
+
+
+# Alias endpoint (giữ lại để tương thích)
+@app.post("/api/pixel-detector/analyze-mobile")
+async def analyze_for_mobile(file: UploadFile = File(...)):
+    """API cho Mobile App - Alias của /upload/mobile"""
+    return await upload_from_mobile(file)
+
+
+@app.get("/api/pixel-detector/templates")
+async def get_pixel_templates():
+    """Lấy danh sách tất cả pixel templates"""
+    try:
+        templates = pixel_detector_service.get_all_templates()
+        return {
+            "success": True,
+            "total": len(templates),
+            "templates": templates
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy danh sách templates: {str(e)}")
+
+
+@app.get("/api/pixel-detector/template/{template_id}")
+async def get_pixel_template_detail(template_id: int):
+    """Lấy chi tiết template và các vị trí pixel"""
+    try:
+        templates = pixel_detector_service.get_all_templates()
+        template = next((t for t in templates if t["id"] == template_id), None)
+        
+        if not template:
+            raise HTTPException(status_code=404, detail="Template không tồn tại")
+        
+        # Get pixel positions
+        positions = pixel_detector_service.get_template_pixels(template_id)
+        
+        return {
+            "success": True,
+            "template": template,
+            "positions": [{"x": x, "y": y} for x, y in positions]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy chi tiết template: {str(e)}")
+
+
+@app.delete("/api/pixel-detector/template/{template_id}")
+async def delete_pixel_template(template_id: int):
+    """Xóa template"""
+    try:
+        pixel_detector_service.delete_template(template_id)
+        return {
+            "success": True,
+            "message": "Đã xóa template thành công"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi xóa template: {str(e)}")
+
+
+@app.get("/api/pixel-detector/analysis-history")
+async def get_analysis_history(limit: int = Query(10, description="Số lượng kết quả (mặc định 10)")):
+    """Lấy lịch sử phân tích"""
+    try:
+        history = pixel_detector_service.get_analysis_history(limit)
+        return {
+            "success": True,
+            "total": len(history),
+            "history": history
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử: {str(e)}")
+
+
+@app.get("/api/pixel-detector/image/{analysis_id}")
+async def get_analysis_image(analysis_id: int):
+    """
+    Xem lại ảnh đã upload từ mobile theo analysis_id
+    """
+    try:
+        history = pixel_detector_service.get_analysis_history(limit=1000)
+        analysis = next((h for h in history if h["id"] == analysis_id), None)
+        
+        if not analysis:
+            raise HTTPException(status_code=404, detail="Không tìm thấy phân tích này")
+        
+        # Lấy image_path từ results hoặc từ database
+        image_path = None
+        if isinstance(analysis.get("results"), list) and len(analysis["results"]) > 0:
+            # Nếu có lưu trong results (cũ)
+            pass
+        
+        # Kiểm tra trong database
+        conn = sqlite3.connect(pixel_detector_service.db_path)
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT image_path FROM pixel_analyses WHERE id = ?", (analysis_id,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                image_path = row[0]
+        finally:
+            conn.close()
+        
+        if not image_path or not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail="Ảnh không tồn tại hoặc đã bị xóa")
+        
+        return FileResponse(
+            image_path,
+            media_type="image/jpeg",
+            filename=os.path.basename(image_path)
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy ảnh: {str(e)}")
+
+
+# ==================== OCR (ChatGPT Vision) APIs ====================
+
+@app.post("/api/ocr/analyze")
+async def analyze_image_ocr(file: UploadFile = File(...)):
+    """
+    Đọc text từ ảnh sử dụng ChatGPT Vision API
+    """
+    try:
+        import base64
+        import httpx
+        
+        # Đọc ảnh
+        image_data = await file.read()
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        
+        # Lấy OpenAI API key từ environment variable hoặc .env file
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        
+        # Nếu không có trong env, thử đọc từ file .env
+        if not openai_api_key:
+            env_file_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+            if os.path.exists(env_file_path):
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('OPENAI_API_KEY='):
+                            openai_api_key = line.split('=', 1)[1].strip()
+                            break
+        
+        if not openai_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="OPENAI_API_KEY chưa được cấu hình. Vui lòng tạo file .env hoặc set biến môi trường OPENAI_API_KEY"
+            )
+        
+        # Gọi ChatGPT Vision API
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}"
+                },
+                json={
+                    "model": "gpt-4o",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": """Extract text from this betting history table image and return in structured format.
+
+IMPORTANT: This is a "LỊCH SỬ CƯỢC" (Betting History) table. Extract these columns in order:
+1. Phiên (Session ID)
+2. Thời gian (Time - format: DD-MM-YYYY HH:MM:SS)
+3. Đặt cược (Bet: Tài or Xỉu)
+4. Kết quả (Result: Tài or Xỉu)
+5. Tổng cược (Total Bet)
+6. Tiền thắng (Winnings)
+7. Thắng/Thua (Win/Loss - calculate this: if Bet=Result → "Thắng", else → "Thua")
+
+Return format (use pipe | as separator):
+Phiên|Thời gian|Đặt cược|Kết quả|Tổng cược|Tiền thắng|Thắng/Thua
+524124|03-11-2025 17:41:46|Tài|Tài|2,000|+1,960|Thắng
+524123|03-11-2025 17:40:45|Tài|Xỉu|1,000|-1,000|Thua
+524122|03-11-2025 17:39:50|Tài|Tài|1,000|+980|Thắng
+524121|03-11-2025 17:38:43|Tài|Xỉu|1,000|-1,000|Thua
+
+Rules:
+- Each row on a new line
+- Use | to separate columns
+- Keep numbers with commas (e.g., 2,000)
+- Keep + or - sign for winnings
+- For "Thắng/Thua": if "Đặt cược" = "Kết quả" then "Thắng", else "Thua"
+- If not a betting table, extract all text normally"""
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                        "detail": "high"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "max_tokens": 4096,
+                    "temperature": 0.1
+                }
+            )
+        
+        if response.status_code != 200:
+            error_detail = response.text
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Lỗi từ OpenAI API (HTTP {response.status_code}): {error_detail}"
+            )
+        
+        result = response.json()
+        extracted_text = result['choices'][0]['message']['content']
+        
+        # Kiểm tra nếu ChatGPT từ chối
+        refusal_phrases = [
+            "I'm sorry",
+            "I can't assist",
+            "I cannot help",
+            "I'm unable to",
+            "I apologize"
+        ]
+        
+        if any(phrase.lower() in extracted_text.lower() for phrase in refusal_phrases):
+            # Log để debug
+            print(f"[OCR] ChatGPT refusal detected: {extracted_text}")
+            print(f"[OCR] Full response: {json.dumps(result)}")
+            
+            # Kiểm tra xem có phải do content policy không
+            refusal_detail = f"""OpenAI từ chối xử lý ảnh này.
+
+Response từ ChatGPT: "{extracted_text}"
+
+Nguyên nhân có thể:
+1. ⚠️ Ảnh chứa nội dung liên quan đến cờ bạc/game/casino
+2. ⚠️ Ảnh chứa nội dung nhạy cảm hoặc vi phạm policy
+3. ⚠️ Ảnh không rõ ràng hoặc bị lỗi
+
+Giải pháp:
+- Thử ảnh khác không liên quan đến game/cờ bạc
+- Đảm bảo ảnh rõ nét, không bị mờ
+- Thử crop ảnh để chỉ lấy phần text cần đọc
+
+Hoặc liên hệ admin để được hỗ trợ."""
+            
+            raise HTTPException(
+                status_code=400,
+                detail=refusal_detail
+            )
+        
+        # Lưu vào database
+        conn = sqlite3.connect('logs.db')
+        cursor = conn.cursor()
+        
+        # Tạo table nếu chưa có
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ocr_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                extracted_text TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Insert result
+        cursor.execute("""
+            INSERT INTO ocr_results (extracted_text)
+            VALUES (?)
+        """, (extracted_text,))
+        
+        conn.commit()
+        ocr_id = cursor.lastrowid
+        conn.close()
+        
+        return {
+            "success": True,
+            "ocr_id": ocr_id,
+            "text": extracted_text,
+            "message": "Đọc text thành công"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi: {str(e)}")
+
+
+@app.get("/api/ocr/history")
+async def get_ocr_history(limit: int = Query(10, description="Số lượng kết quả")):
+    """Lấy lịch sử đọc text"""
+    try:
+        conn = sqlite3.connect('logs.db')
+        cursor = conn.cursor()
+        
+        # Tạo table nếu chưa có
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ocr_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                extracted_text TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        
+        cursor.execute("""
+            SELECT id, extracted_text, created_at
+            FROM ocr_results
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,))
+        
+        history = []
+        for row in cursor.fetchall():
+            history.append({
+                "id": row[0],
+                "extracted_text": row[1],
+                "created_at": row[2]
+            })
+        
+        conn.close()
+        
+        return {
+            "success": True,
+            "total": len(history),
+            "history": history
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử: {str(e)}")
+
+
 # ==================== ADMIN WEB INTERFACE ====================
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -1365,6 +1932,8 @@ async def admin_dashboard():
                 <button class="btn btn-primary" onclick="refreshCurrentView()">🔄 Làm mới</button>
                 <button class="btn btn-success" onclick="switchView('screenshots')">🖼️ Screenshots</button>
                 <button class="btn btn-success" onclick="switchView('templates')">📄 Templates</button>
+                <button class="btn btn-info" onclick="switchView('pixel-detector')">🔍 Pixel Detector</button>
+                <button class="btn btn-warning" onclick="switchView('ocr')">📝 Đọc text</button>
             </div>
             <input type="text" class="search-box" id="search" placeholder="Tìm kiếm..." onkeyup="filterTable()">
         </div>
@@ -1553,6 +2122,179 @@ async def admin_dashboard():
             </div>
         </div>
         
+        <!-- Pixel Detector View -->
+        <div class="table-container" id="pixel-detector-view" style="display: none;">
+            <h2 style="color: #667eea; margin-bottom: 25px;">🔍 Pixel Detector Tool</h2>
+            <p style="margin-bottom: 30px; color: #666;">
+                Tool này giúp bạn nhận diện vị trí các pixel có màu <strong style="color: #1AFF0D;">#1AFF0D</strong> 
+                trong ảnh mẫu, sau đó <strong>kiểm tra từng pixel</strong> tại các vị trí tương ứng trong ảnh cần phân tích: <strong style="color: #f39c12;">Sáng</strong> hoặc <strong style="color: #555;">Tối</strong>.
+            </p>
+            
+            <!-- Step 1: Upload Template -->
+            <div style="background: #f8f9fa; padding: 25px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <h3 style="color: #28a745; margin-bottom: 20px;">📤 Bước 1: Upload ảnh mẫu</h3>
+                <p style="margin-bottom: 10px; color: #666;">
+                    Upload ảnh có chứa các pixel màu <strong style="color: #1AFF0D;">#1AFF0D</strong> để đánh dấu vị trí cần đọc
+                </p>
+                <div style="background: #fff3cd; color: #856404; padding: 10px; border-radius: 6px; margin-bottom: 15px; border-left: 4px solid #ffc107;">
+                    <strong>⚠️ Lưu ý:</strong> Chỉ cho phép <strong>1 ảnh mẫu duy nhất</strong>. Upload ảnh mới sẽ <strong>thay thế</strong> ảnh mẫu cũ!
+                </div>
+                <form id="pixel-template-form" onsubmit="uploadPixelTemplate(event); return false;" style="display: flex; flex-direction: column; gap: 15px;">
+                    <div>
+                        <label style="font-weight: 600; display: block; margin-bottom: 5px;">Chọn ảnh mẫu:</label>
+                        <input type="file" id="pixel-template-file" accept="image/*" required style="width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 6px;">
+                    </div>
+                    <button type="submit" class="btn btn-success" style="align-self: flex-start;">🚀 Upload và Detect Pixels</button>
+                </form>
+                <div id="pixel-template-result" style="margin-top: 20px;">
+                    <div style="background: #fffbea; border: 2px dashed #ddd; padding: 20px; border-radius: 8px; text-align: center; color: #999;">
+                        <p style="margin: 0; font-style: italic;">📊 Kết quả detect pixel sẽ hiển thị ở đây sau khi upload...</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Current Template Info -->
+            <div id="current-pixel-template-info" style="background: #e8f5e9; padding: 20px; border-radius: 12px; margin-bottom: 30px; display: none;">
+                <h3 style="color: #28a745; margin-bottom: 15px;">✅ Template hiện tại</h3>
+                <div id="template-info-content"></div>
+            </div>
+            
+            <!-- Step 2: Analyze Image -->
+            <div style="background: #f8f9fa; padding: 25px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <h3 style="color: #17a2b8; margin-bottom: 20px;">🔍 Bước 2: Phân tích ảnh</h3>
+                <p style="margin-bottom: 15px; color: #666;">
+                    Upload ảnh cần phân tích để <strong>kiểm tra từng pixel</strong> tại các vị trí đã đánh dấu: 
+                    <strong style="color: #f39c12;">Sáng</strong> hoặc <strong style="color: #555;">Tối</strong>
+                </p>
+                
+                <!-- API Info for Mobile -->
+                <div style="background: #e3f2fd; border-left: 4px solid #2196F3; padding: 15px; margin-bottom: 20px; border-radius: 6px;">
+                    <h4 style="color: #1976D2; margin: 0 0 10px 0;">📱 API cho Mobile App:</h4>
+                    <div style="display: flex; align-items: center; gap: 10px; background: white; padding: 10px; border-radius: 4px;">
+                        <code style="flex: 1; font-size: 13px; color: #1976D2; font-weight: 600; user-select: all;">https://lukistar.space/upload/mobile</code>
+                        <button class="btn btn-secondary" onclick="copyToClipboard('https://lukistar.space/upload/mobile')" style="padding: 6px 12px; font-size: 12px;">📋 Copy</button>
+                    </div>
+                    <p style="margin: 10px 0 0 0; font-size: 12px; color: #666;">
+                        <strong>Method:</strong> POST | <strong>Body:</strong> multipart/form-data với field <code>file</code>
+                    </p>
+                </div>
+                
+                <form id="pixel-analyze-form" onsubmit="analyzePixelImage(event); return false;" style="display: flex; flex-direction: column; gap: 15px;">
+                    <div>
+                        <label style="font-weight: 600; display: block; margin-bottom: 5px;">Chọn ảnh cần phân tích:</label>
+                        <input type="file" id="pixel-analyze-file" accept="image/*" required style="width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 6px;">
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="align-self: flex-start;">🔍 Phân tích</button>
+                </form>
+                <div id="pixel-analyze-result" style="margin-top: 20px;"></div>
+            </div>
+            
+            <!-- Analysis Results -->
+            <div id="pixel-analysis-results-container" style="display: none;">
+                <h3 style="color: #667eea; margin-bottom: 20px;">📊 Kết quả phân tích</h3>
+                <div id="pixel-analysis-results-content"></div>
+            </div>
+            
+            <!-- Mobile Upload History -->
+            <div style="margin-top: 40px; padding-top: 30px; border-top: 2px solid #eee;">
+                <h3 style="color: #667eea; margin-bottom: 20px;">📱 Lịch sử upload từ Mobile</h3>
+                <button class="btn btn-primary" onclick="loadMobileUploadHistory()" style="margin-bottom: 15px;">🔄 Làm mới</button>
+                <div id="mobile-upload-history"></div>
+            </div>
+            
+            <!-- Templates List -->
+            <div style="margin-top: 40px; padding-top: 30px; border-top: 2px solid #eee;">
+                <h3 style="color: #667eea; margin-bottom: 20px;">📋 Danh sách Templates</h3>
+                <button class="btn btn-primary" onclick="loadPixelTemplates()" style="margin-bottom: 15px;">🔄 Làm mới</button>
+                <div id="pixel-templates-list"></div>
+            </div>
+        </div>
+        
+        <!-- OCR View -->
+        <div class="table-container" id="ocr-view" style="display: none;">
+            <h2 style="color: #667eea; margin-bottom: 25px;">📝 Đọc text từ ảnh (ChatGPT Vision)</h2>
+            <p style="margin-bottom: 30px; color: #666;">
+                Sử dụng <strong>ChatGPT Vision API</strong> để đọc và trích xuất nội dung text từ ảnh.
+            </p>
+            
+            <!-- Upload Section -->
+            <div style="background: #f8f9fa; padding: 25px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <h3 style="color: #28a745; margin-bottom: 20px;">📤 Upload ảnh cần đọc</h3>
+                
+                <form id="ocr-form" onsubmit="startOCR(event); return false;" style="display: flex; flex-direction: column; gap: 15px;">
+                    <div>
+                        <label style="font-weight: 600; display: block; margin-bottom: 5px;">Chọn ảnh:</label>
+                        <input type="file" id="ocr-file" accept="image/*" required style="width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 6px;">
+                    </div>
+                    
+                    <!-- Image Preview -->
+                    <div id="ocr-preview" style="display: none; margin-top: 10px;">
+                        <p style="font-weight: 600; margin-bottom: 5px;">Xem trước:</p>
+                        <img id="ocr-preview-img" style="max-width: 100%; max-height: 400px; border: 2px solid #ddd; border-radius: 8px;" />
+                    </div>
+                    
+                    <button type="submit" class="btn btn-success" style="align-self: flex-start; font-size: 16px; padding: 12px 24px;">🚀 Bắt đầu đọc</button>
+                </form>
+                
+                <!-- Loading Indicator -->
+                <div id="ocr-loading" style="display: none; margin-top: 20px; text-align: center;">
+                    <div style="display: inline-block; padding: 20px; background: #fff3cd; border-radius: 8px; border: 2px solid #ffc107;">
+                        <p style="margin: 0; color: #856404; font-weight: 600;">⏳ Đang xử lý với ChatGPT...</p>
+                        <p style="margin: 5px 0 0 0; color: #856404; font-size: 14px;">Vui lòng đợi...</p>
+                    </div>
+                </div>
+                
+                <!-- Result -->
+                <div id="ocr-result" style="margin-top: 20px; display: none;">
+                    <h4 style="color: #28a745; margin-bottom: 15px;">✅ Kết quả đọc text:</h4>
+                    
+                    <!-- Column filter for table -->
+                    <div id="ocr-column-filter" style="display: none; margin-bottom: 15px; padding: 15px; background: #f0f8ff; border-radius: 6px; border: 1px solid #2196F3;">
+                        <strong style="display: block; margin-bottom: 10px;">🔧 Chọn cột hiển thị:</strong>
+                        <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                <input type="checkbox" class="column-toggle" data-col="0" checked> Phiên
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                <input type="checkbox" class="column-toggle" data-col="1" checked> Thời gian
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                <input type="checkbox" class="column-toggle" data-col="2" checked> Đặt cược
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                <input type="checkbox" class="column-toggle" data-col="3" checked> Kết quả
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                <input type="checkbox" class="column-toggle" data-col="4" checked> Tổng cược
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                <input type="checkbox" class="column-toggle" data-col="5" checked> Tiền thắng
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                <input type="checkbox" class="column-toggle" data-col="6" checked> Thắng/Thua
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div id="ocr-result-content" style="background: white; padding: 20px; border-radius: 8px; border: 2px solid #28a745; white-space: pre-wrap; font-family: monospace; max-height: 500px; overflow-y: auto;"></div>
+                </div>
+                
+                <!-- Error -->
+                <div id="ocr-error" style="margin-top: 20px; display: none;">
+                    <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 6px; border: 2px solid #f5c6cb;">
+                        <strong>❌ Lỗi:</strong> <span id="ocr-error-message"></span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- History Section -->
+            <div style="margin-top: 40px; padding-top: 30px; border-top: 2px solid #eee;">
+                <h3 style="color: #667eea; margin-bottom: 20px;">📋 Lịch sử đọc text</h3>
+                <button class="btn btn-primary" onclick="loadOCRHistory()" style="margin-bottom: 15px;">🔄 Làm mới</button>
+                <div id="ocr-history"></div>
+            </div>
+        </div>
+        
         <div class="pagination" id="pagination"></div>
     </div>
     
@@ -1666,6 +2408,8 @@ async def admin_dashboard():
             currentView = view;
             document.getElementById('screenshots-view').style.display = 'none';
             document.getElementById('templates-view').style.display = 'none';
+            document.getElementById('pixel-detector-view').style.display = 'none';
+            document.getElementById('ocr-view').style.display = 'none';
             
             if (view === 'screenshots') {
                 document.getElementById('screenshots-view').style.display = 'block';
@@ -1673,6 +2417,13 @@ async def admin_dashboard():
             } else if (view === 'templates') {
                 document.getElementById('templates-view').style.display = 'block';
                 loadTemplates();
+            } else if (view === 'pixel-detector') {
+                document.getElementById('pixel-detector-view').style.display = 'block';
+                loadPixelTemplates();
+                loadMobileUploadHistory();
+            } else if (view === 'ocr') {
+                document.getElementById('ocr-view').style.display = 'block';
+                loadOCRHistory();
             }
         }
         
@@ -2360,6 +3111,599 @@ async def admin_dashboard():
         
         // ==================== END BETTING COORDINATES FUNCTIONS ====================
         
+        // ==================== PIXEL DETECTOR FUNCTIONS ====================
+        
+        async function uploadPixelTemplate(event) {
+                console.log('uploadPixelTemplate called');
+                event.preventDefault();
+                event.stopPropagation();
+                
+                const resultDiv = document.getElementById('pixel-template-result');
+                resultDiv.innerHTML = '<div class="loading">Đang xử lý ảnh mẫu...</div>';
+                
+                try {
+                    // Tự động tạo tên template
+                    const name = 'Template ' + new Date().toLocaleString('vi-VN');
+                    
+                    const fileInput = document.getElementById('pixel-template-file');
+                    const file = fileInput.files[0];
+                    
+                    if (!file) {
+                        throw new Error('Vui lòng chọn file ảnh');
+                    }
+                    
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    
+                    const response = await fetch(`/api/pixel-detector/upload-template?name=${encodeURIComponent(name)}`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    console.log('Upload response:', data);
+                    
+                    if (response.ok && data.success) {
+                        console.log('Upload successful, displaying results');
+                        // Không hiển thị danh sách pixel positions nữa
+                        
+                        resultDiv.innerHTML = `
+                            <div style="background: #d4edda; color: #155724; padding: 20px; border-radius: 8px; border: 2px solid #28a745;">
+                                <h4 style="margin: 0 0 15px 0;">✅ ${data.message}</h4>
+                                
+                                <!-- Số lượng pixel nổi bật -->
+                                <div style="background: #fff; padding: 15px; border-radius: 8px; text-align: center; margin-bottom: 15px; border: 2px solid #1AFF0D;">
+                                    <div style="font-size: 14px; color: #666; margin-bottom: 5px;">Số lượng pixel màu #1AFF0D phát hiện được:</div>
+                                    <div style="font-size: 42px; font-weight: bold; color: #28a745;">${data.pixel_count}</div>
+                                    <div style="font-size: 12px; color: #999; margin-top: 5px;">vị trí đã lưu vào database</div>
+                                </div>
+                                
+                                <div style="background: rgba(255,255,255,0.5); padding: 10px; border-radius: 6px;">
+                                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 14px;">
+                                        <div><strong>Template ID:</strong> ${data.template_id}</div>
+                                        <div><strong>Kích thước ảnh:</strong> ${data.image_size.width}x${data.image_size.height}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        
+                        // Reset form
+                        document.getElementById('pixel-template-form').reset();
+                        
+                        // Reload templates
+                        loadPixelTemplates();
+                    } else {
+                        throw new Error(data.detail || 'Lỗi không xác định');
+                    }
+                } catch (error) {
+                    console.error('Upload error:', error);
+                    resultDiv.innerHTML = `
+                        <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 6px;">
+                            <strong>❌ Lỗi:</strong> ${error.message}
+                        </div>
+                    `;
+                }
+                
+                return false; // Thêm return false để chắc chắn không submit
+            }
+            
+            async function analyzePixelImage(event) {
+                event.preventDefault();
+                
+                const resultDiv = document.getElementById('pixel-analyze-result');
+                resultDiv.innerHTML = '<div class="loading">Đang phân tích ảnh...</div>';
+                
+                try {
+                    const fileInput = document.getElementById('pixel-analyze-file');
+                    const file = fileInput.files[0];
+                    
+                    if (!file) {
+                        throw new Error('Vui lòng chọn file ảnh');
+                    }
+                    
+                    // Sử dụng giá trị mặc định
+                    const regionWidth = 100;
+                    const regionHeight = 40;
+                    
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    
+                    const response = await fetch(`/api/pixel-detector/analyze?region_width=${regionWidth}&region_height=${regionHeight}`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok && data.success) {
+                        resultDiv.innerHTML = `
+                            <div style="background: #d4edda; color: #155724; padding: 15px; border-radius: 6px;">
+                                <h4>✅ ${data.message}</h4>
+                                <p><strong>Template:</strong> ${data.template_name}</p>
+                            </div>
+                        `;
+                        
+                        // Display results
+                        displayAnalysisResults(data.results);
+                        
+                        // Reload mobile upload history
+                        loadMobileUploadHistory();
+                        
+                        // Reset form
+                        document.getElementById('pixel-analyze-form').reset();
+                    } else {
+                        throw new Error(data.detail || 'Lỗi không xác định');
+                    }
+                } catch (error) {
+                    resultDiv.innerHTML = `
+                        <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 6px;">
+                            <strong>❌ Lỗi:</strong> ${error.message}
+                        </div>
+                    `;
+                }
+            }
+            
+            function displayAnalysisResults(results) {
+                const container = document.getElementById('pixel-analysis-results-container');
+                const content = document.getElementById('pixel-analysis-results-content');
+                
+                if (!results || results.length === 0) {
+                    content.innerHTML = '<p>Không có kết quả</p>';
+                    container.style.display = 'block';
+                    return;
+                }
+                
+                // Tính thống kê
+                let lightCount = 0;
+                let darkCount = 0;
+                results.forEach(result => {
+                    if (result.result === 'Sáng') lightCount++;
+                    else if (result.result === 'Tối') darkCount++;
+                });
+                
+                // CHỈ hiển thị thống kê tổng
+                let html = `
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                        <div style="background: #fff9e6; padding: 30px; border-radius: 12px; text-align: center; border: 3px solid #f39c12; box-shadow: 0 4px 12px rgba(243, 156, 18, 0.3);">
+                            <div style="font-size: 18px; color: #666; margin-bottom: 15px; font-weight: 600;">🔆 Pixel Sáng</div>
+                            <div style="font-size: 64px; font-weight: bold; color: #f39c12;">${lightCount}</div>
+                            <div style="font-size: 16px; color: #999; margin-top: 10px;">vị trí</div>
+                        </div>
+                        <div style="background: #f0f0f0; padding: 30px; border-radius: 12px; text-align: center; border: 3px solid #555; box-shadow: 0 4px 12px rgba(85, 85, 85, 0.3);">
+                            <div style="font-size: 18px; color: #666; margin-bottom: 15px; font-weight: 600;">🌑 Pixel Tối</div>
+                            <div style="font-size: 64px; font-weight: bold; color: #555;">${darkCount}</div>
+                            <div style="font-size: 16px; color: #999; margin-top: 10px;">vị trí</div>
+                        </div>
+                    </div>
+                    <div style="text-align: center; margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
+                        <p style="font-size: 18px; color: #667eea; font-weight: 600; margin: 0;">
+                            Tổng cộng: <strong>${results.length}</strong> vị trí đã được phân tích
+                        </p>
+                    </div>
+                `;
+                
+                content.innerHTML = html;
+                container.style.display = 'block';
+            }
+            
+            async function loadMobileUploadHistory() {
+                const historyDiv = document.getElementById('mobile-upload-history');
+                historyDiv.innerHTML = '<div class="loading">Đang tải lịch sử...</div>';
+                
+                try {
+                    const response = await fetch('/api/pixel-detector/analysis-history?limit=10');
+                    const data = await response.json();
+                    
+                    if (response.ok && data.success) {
+                        if (data.history.length === 0) {
+                            historyDiv.innerHTML = '<p style="color: #666; font-style: italic; padding: 20px; text-align: center;">Chưa có ảnh nào được upload từ mobile</p>';
+                        } else {
+                            let html = '<div style="overflow-x: auto;">';
+                            html += '<table style="width: 100%; border-collapse: collapse; background: white;">';
+                            html += '<thead><tr style="background: #667eea; color: white;">';
+                            html += '<th style="padding: 12px; text-align: left;">ID</th>';
+                            html += '<th style="padding: 12px; text-align: left;">Ảnh</th>';
+                            html += '<th style="padding: 12px; text-align: left;">Thời gian nhận</th>';
+                            html += '<th style="padding: 12px; text-align: center;">Pixel Sáng</th>';
+                            html += '<th style="padding: 12px; text-align: center;">Pixel Tối</th>';
+                            html += '<th style="padding: 12px; text-align: center;">Tổng</th>';
+                            html += '<th style="padding: 12px; text-align: center;">Hành động</th>';
+                            html += '</tr></thead><tbody>';
+                            
+                            data.history.forEach(item => {
+                                // Tính thống kê
+                                let lightCount = 0;
+                                let darkCount = 0;
+                                if (item.results && Array.isArray(item.results)) {
+                                    item.results.forEach(r => {
+                                        if (r.result === 'Sáng') lightCount++;
+                                        else if (r.result === 'Tối') darkCount++;
+                                    });
+                                }
+                                
+                                // Format thời gian
+                                const analyzedAt = new Date(item.analyzed_at).toLocaleString('vi-VN');
+                                
+                                // Image URL
+                                const imageUrl = item.image_path 
+                                    ? `/api/pixel-detector/image/${item.id}` 
+                                    : null;
+                                
+                                html += '<tr style="border-bottom: 1px solid #eee;">';
+                                html += `<td style="padding: 12px;">#${item.id}</td>`;
+                                
+                                // Thumbnail
+                                html += '<td style="padding: 12px;">';
+                                if (imageUrl) {
+                                    html += `<img src="${imageUrl}" style="width: 80px; height: 60px; object-fit: cover; border-radius: 4px; cursor: pointer; border: 2px solid #ddd;" onclick="window.open('${imageUrl}', '_blank')" title="Click để xem ảnh gốc">`;
+                                } else {
+                                    html += '<span style="color: #999; font-style: italic;">Không có</span>';
+                                }
+                                html += '</td>';
+                                
+                                // Thời gian
+                                html += `<td style="padding: 12px;">${analyzedAt}</td>`;
+                                
+                                // Pixel Sáng
+                                html += `<td style="padding: 12px; text-align: center; background: #fff9e6;"><strong style="color: #f39c12;">${lightCount}</strong></td>`;
+                                
+                                // Pixel Tối
+                                html += `<td style="padding: 12px; text-align: center; background: #f0f0f0;"><strong style="color: #555;">${darkCount}</strong></td>`;
+                                
+                                // Tổng
+                                html += `<td style="padding: 12px; text-align: center;"><strong>${lightCount + darkCount}</strong></td>`;
+                                
+                                // Hành động
+                                html += '<td style="padding: 12px; text-align: center;">';
+                                if (imageUrl) {
+                                    html += `<button class="btn btn-info" onclick="window.open('${imageUrl}', '_blank')" style="padding: 5px 10px; font-size: 12px;">👁️ Xem ảnh</button>`;
+                                }
+                                html += '</td>';
+                                
+                                html += '</tr>';
+                            });
+                            
+                            html += '</tbody></table></div>';
+                            historyDiv.innerHTML = html;
+                        }
+                    } else {
+                        throw new Error(data.detail || 'Lỗi tải lịch sử');
+                    }
+                } catch (error) {
+                    historyDiv.innerHTML = `
+                        <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 6px;">
+                            <strong>❌ Lỗi:</strong> ${error.message}
+                        </div>
+                    `;
+                }
+            }
+            
+            async function loadPixelTemplates() {
+                const listDiv = document.getElementById('pixel-templates-list');
+                listDiv.innerHTML = '<div class="loading">Đang tải templates...</div>';
+                
+                try {
+                    const response = await fetch('/api/pixel-detector/templates');
+                    const data = await response.json();
+                    
+                    if (response.ok && data.success) {
+                        const uploadSection = document.querySelector('#pixel-detector-view > div:nth-child(3)'); // Upload form section
+                        
+                        if (data.templates.length === 0) {
+                            listDiv.innerHTML = '<p style="color: #666; font-style: italic;">Chưa có template nào</p>';
+                            // Chưa có template - HIỆN form upload
+                            if (uploadSection) uploadSection.style.display = 'block';
+                            document.getElementById('current-pixel-template-info').style.display = 'none';
+                        } else {
+                            let html = '<table style="width: 100%; border-collapse: collapse;">';
+                            html += '<thead><tr style="background: #667eea; color: white;">';
+                            html += '<th style="padding: 10px; text-align: left;">ID</th>';
+                            html += '<th style="padding: 10px; text-align: left;">Tên</th>';
+                            html += '<th style="padding: 10px; text-align: left;">Số pixel</th>';
+                            html += '<th style="padding: 10px; text-align: left;">Kích thước</th>';
+                            html += '<th style="padding: 10px; text-align: left;">Ngày tạo</th>';
+                            html += '<th style="padding: 10px; text-align: left;">Trạng thái</th>';
+                            html += '<th style="padding: 10px; text-align: left;">Hành động</th>';
+                            html += '</tr></thead><tbody>';
+                            
+                            data.templates.forEach(template => {
+                                html += '<tr style="border-bottom: 1px solid #eee;">';
+                                html += `<td style="padding: 10px;">${template.id}</td>`;
+                                html += `<td style="padding: 10px;">${template.name}</td>`;
+                                html += `<td style="padding: 10px;">${template.pixel_count}</td>`;
+                                html += `<td style="padding: 10px;">${template.image_width}x${template.image_height}</td>`;
+                                html += `<td style="padding: 10px;">${new Date(template.created_at).toLocaleString('vi-VN')}</td>`;
+                                html += `<td style="padding: 10px;">`;
+                                if (template.is_active) {
+                                    html += '<span class="badge badge-success">Đang dùng</span>';
+                                } else {
+                                    html += '<span class="badge badge-info">Không dùng</span>';
+                                }
+                                html += '</td>';
+                                html += `<td style="padding: 10px;">`;
+                                html += `<button class="btn btn-danger" onclick="deletePixelTemplate(${template.id})" style="padding: 5px 10px; font-size: 12px;">🗑️ Xóa</button>`;
+                                html += '</td>';
+                                html += '</tr>';
+                            });
+                            
+                            html += '</tbody></table>';
+                            listDiv.innerHTML = html;
+                            
+                            // Show current active template và ẩn/hiện upload form
+                            const activeTemplate = data.templates.find(t => t.is_active);
+                            const uploadSection = document.querySelector('#pixel-detector-view > div:nth-child(3)'); // Upload form section
+                            
+                            if (activeTemplate) {
+                                // Đã có template - ẨN form upload, HIỆN thông tin template
+                                if (uploadSection) uploadSection.style.display = 'none';
+                                document.getElementById('current-pixel-template-info').style.display = 'block';
+                                document.getElementById('template-info-content').innerHTML = `
+                                    <p><strong>Tên:</strong> ${activeTemplate.name}</p>
+                                    <p><strong>Số pixel:</strong> ${activeTemplate.pixel_count} vị trí</p>
+                                    <p><strong>Kích thước:</strong> ${activeTemplate.image_width}x${activeTemplate.image_height}</p>
+                                    <p><strong>Ngày tạo:</strong> ${new Date(activeTemplate.created_at).toLocaleString('vi-VN')}</p>
+                                    <p style="margin-top: 15px;"><em>✅ Template đã sẵn sàng. Bạn có thể phân tích ảnh ngay!</em></p>
+                                `;
+                            } else {
+                                // Chưa có template - HIỆN form upload, ẨN thông tin template
+                                if (uploadSection) uploadSection.style.display = 'block';
+                                document.getElementById('current-pixel-template-info').style.display = 'none';
+                            }
+                        }
+                    } else {
+                        throw new Error(data.detail || 'Lỗi tải templates');
+                    }
+                } catch (error) {
+                    listDiv.innerHTML = `
+                        <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 6px;">
+                            <strong>❌ Lỗi:</strong> ${error.message}
+                        </div>
+                    `;
+                }
+            }
+            
+            async function deletePixelTemplate(templateId) {
+                if (!confirm('Bạn có chắc muốn xóa template này?')) {
+                    return;
+                }
+                
+                try {
+                    const response = await fetch(`/api/pixel-detector/template/${templateId}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok && data.success) {
+                        alert('✅ Đã xóa template thành công');
+                        loadPixelTemplates();
+                    } else {
+                        throw new Error(data.detail || 'Lỗi không xác định');
+                    }
+                } catch (error) {
+                    alert('❌ Lỗi: ' + error.message);
+                }
+            }
+            
+            // ==================== OCR FUNCTIONS ====================
+            
+            // Preview image when selected
+            document.addEventListener('DOMContentLoaded', function() {
+                const fileInput = document.getElementById('ocr-file');
+                if (fileInput) {
+                    fileInput.addEventListener('change', function(e) {
+                        const file = e.target.files[0];
+                        if (file) {
+                            const reader = new FileReader();
+                            reader.onload = function(e) {
+                                document.getElementById('ocr-preview-img').src = e.target.result;
+                                document.getElementById('ocr-preview').style.display = 'block';
+                            };
+                            reader.readAsDataURL(file);
+                        }
+                    });
+                }
+            });
+            
+            async function startOCR(event) {
+                event.preventDefault();
+                event.stopPropagation();
+                
+                const fileInput = document.getElementById('ocr-file');
+                const file = fileInput.files[0];
+                
+                if (!file) {
+                    alert('Vui lòng chọn ảnh');
+                    return;
+                }
+                
+                // Hide previous results/errors
+                document.getElementById('ocr-result').style.display = 'none';
+                document.getElementById('ocr-error').style.display = 'none';
+                
+                // Show loading
+                document.getElementById('ocr-loading').style.display = 'block';
+                
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                try {
+                    const response = await fetch('/api/ocr/analyze', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    
+                    // Hide loading
+                    document.getElementById('ocr-loading').style.display = 'none';
+                    
+                    if (response.ok && data.success) {
+                        // Parse and display result
+                        const resultDiv = document.getElementById('ocr-result-content');
+                        const text = data.text;
+                        
+                        // Check if result is table format (contains pipe separator)
+                        if (text.includes('|') && text.split('\\\\n').length > 1) {
+                            // Parse as table
+                            const lines = text.trim().split('\\\\n');
+                            let html = '<div style="overflow-x: auto;">';
+                            html += '<table id="ocr-table" style="width: 100%; border-collapse: collapse; background: white; margin-top: 10px;">';
+                            
+                            lines.forEach((line, index) => {
+                                const cells = line.split('|').map(c => c.trim());
+                                
+                                if (index === 0) {
+                                    // Header row
+                                    html += '<thead><tr style="background: #28a745; color: white;">';
+                                    cells.forEach((cell, cellIndex) => {
+                                        html += `<th class="col-${cellIndex}" style="padding: 12px; text-align: left; border: 1px solid #ddd;">${cell}</th>`;
+                                    });
+                                    html += '</tr></thead><tbody>';
+                                } else {
+                                    // Data row
+                                    html += '<tr style="border-bottom: 1px solid #eee;">';
+                                    cells.forEach((cell, cellIndex) => {
+                                        let style = 'padding: 12px; border: 1px solid #ddd;';
+                                        
+                                        // Highlight "Thắng/Thua" column (index 6)
+                                        if (cellIndex === 6) {
+                                            if (cell === 'Thắng') {
+                                                style += 'background: #d4edda; color: #155724; font-weight: bold; font-size: 16px;';
+                                            } else if (cell === 'Thua') {
+                                                style += 'background: #f8d7da; color: #721c24; font-weight: bold; font-size: 16px;';
+                                            }
+                                        }
+                                        
+                                        // Highlight winnings column (index 5) - lighter
+                                        if (cellIndex === 5) {
+                                            if (cell.startsWith('+')) {
+                                                style += 'color: #28a745; font-weight: 600;';
+                                            } else if (cell.startsWith('-')) {
+                                                style += 'color: #dc3545; font-weight: 600;';
+                                            }
+                                        }
+                                        
+                                        html += `<td class="col-${cellIndex}" style="${style}">${cell}</td>`;
+                                    });
+                                    html += '</tr>';
+                                }
+                            });
+                            
+                            html += '</tbody></table></div>';
+                            
+                            // Add summary
+                            const dataRows = lines.slice(1);
+                            html += `<div style="margin-top: 15px; padding: 10px; background: #e7f3ff; border-radius: 6px; border-left: 4px solid #2196F3;">
+                                <strong>📊 Tổng kết:</strong> ${dataRows.length} dòng dữ liệu
+                            </div>`;
+                            
+                            resultDiv.innerHTML = html;
+                            
+                            // Show column filter
+                            document.getElementById('ocr-column-filter').style.display = 'block';
+                            
+                            // Add column toggle handlers
+                            document.querySelectorAll('.column-toggle').forEach(checkbox => {
+                                checkbox.addEventListener('change', function() {
+                                    const colIndex = this.getAttribute('data-col');
+                                    const cells = document.querySelectorAll(`.col-${colIndex}`);
+                                    cells.forEach(cell => {
+                                        cell.style.display = this.checked ? '' : 'none';
+                                    });
+                                });
+                            });
+                        } else {
+                            // Display as plain text
+                            resultDiv.textContent = text;
+                            document.getElementById('ocr-column-filter').style.display = 'none';
+                        }
+                        
+                        document.getElementById('ocr-result').style.display = 'block';
+                        
+                        // Reload history
+                        loadOCRHistory();
+                        
+                        // Reset form
+                        document.getElementById('ocr-form').reset();
+                        document.getElementById('ocr-preview').style.display = 'none';
+                    } else {
+                        throw new Error(data.detail || 'Lỗi không xác định');
+                    }
+                } catch (error) {
+                    // Hide loading
+                    document.getElementById('ocr-loading').style.display = 'none';
+                    
+                    // Show error
+                    document.getElementById('ocr-error-message').textContent = error.message;
+                    document.getElementById('ocr-error').style.display = 'block';
+                }
+            }
+            
+            async function loadOCRHistory() {
+                const historyDiv = document.getElementById('ocr-history');
+                historyDiv.innerHTML = '<div class="loading">Đang tải lịch sử...</div>';
+                
+                try {
+                    const response = await fetch('/api/ocr/history?limit=10');
+                    const data = await response.json();
+                    
+                    if (response.ok && data.success) {
+                        if (data.history.length === 0) {
+                            historyDiv.innerHTML = '<p style="color: #666; font-style: italic; padding: 20px; text-align: center;">Chưa có lịch sử đọc text</p>';
+                        } else {
+                            let html = '<div style="overflow-x: auto;">';
+                            html += '<table style="width: 100%; border-collapse: collapse; background: white;">';
+                            html += '<thead><tr style="background: #667eea; color: white;">';
+                            html += '<th style="padding: 12px; text-align: left;">ID</th>';
+                            html += '<th style="padding: 12px; text-align: left;">Thời gian</th>';
+                            html += '<th style="padding: 12px; text-align: left;">Nội dung</th>';
+                            html += '</tr></thead><tbody>';
+                            
+                            data.history.forEach(item => {
+                                const createdAt = new Date(item.created_at).toLocaleString('vi-VN');
+                                const textPreview = item.extracted_text.length > 100 
+                                    ? item.extracted_text.substring(0, 100) + '...' 
+                                    : item.extracted_text;
+                                
+                                html += '<tr style="border-bottom: 1px solid #eee;">';
+                                html += `<td style="padding: 12px;">#${item.id}</td>`;
+                                html += `<td style="padding: 12px;">${createdAt}</td>`;
+                                html += `<td style="padding: 12px; font-family: monospace; white-space: pre-wrap;">${textPreview}</td>`;
+                                html += '</tr>';
+                            });
+                            
+                            html += '</tbody></table></div>';
+                            historyDiv.innerHTML = html;
+                        }
+                    } else {
+                        throw new Error(data.detail || 'Lỗi tải lịch sử');
+                    }
+                } catch (error) {
+                    historyDiv.innerHTML = `
+                        <div style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 6px;">
+                            <strong>❌ Lỗi:</strong> ${error.message}
+                        </div>
+                    `;
+                }
+            }
+            
+        // ==================== EVENT HANDLERS ====================
+        
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modal = document.getElementById('detailModal');
+            const uploadModal = document.getElementById('uploadTemplateModal');
+            const dotsModal = document.getElementById('templateDotsModal');
+            if (event.target == modal) {
+                closeModal();
+            } else if (event.target == uploadModal) {
+                closeUploadTemplateModal();
+            } else if (event.target == dotsModal) {
+                closeTemplateDotsModal();
+            }
+        }
+        
         // Load data on page load
         window.onload = function() {
             // Load Screenshots view by default
@@ -2368,20 +3712,6 @@ async def admin_dashboard():
             // Load saved betting coordinates
             loadBettingCoords();
             loadBettingMethod();
-            
-            // Close modal when clicking outside
-            window.onclick = function(event) {
-                const modal = document.getElementById('detailModal');
-                const uploadModal = document.getElementById('uploadTemplateModal');
-                const dotsModal = document.getElementById('templateDotsModal');
-                if (event.target == modal) {
-                    closeModal();
-                } else if (event.target == uploadModal) {
-                    closeUploadTemplateModal();
-                } else if (event.target == dotsModal) {
-                    closeTemplateDotsModal();
-                }
-            }
         }
     </script>
 </body>
