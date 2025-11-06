@@ -28,7 +28,9 @@ from .services.green_detector import (
 from .services.log_service import LogService
 from .services.template_service import TemplateService
 from .services.settings_service import SettingsService
+from .services.mobile_betting_service import mobile_betting_service
 from .services.pixel_detector_service import PixelDetectorService
+from .services.session_service import SessionService
 
 # Import config (optional)
 try:
@@ -80,6 +82,7 @@ log_service = LogService()
 template_service = TemplateService()
 settings_service = SettingsService()
 pixel_detector_service = PixelDetectorService()
+session_service = SessionService()
 
 
 # ==================== EXCEPTION HANDLERS - ĐẢM BẢO CORS HEADERS CHO TẤT CẢ ERRORS ====================
@@ -1300,6 +1303,1434 @@ async def upload_from_mobile(request: Request):
         raise HTTPException(status_code=500, detail=f"Lỗi phân tích: {str(e)}")
 
 
+@app.post("/upload/mobile/ocr")
+async def upload_from_mobile_ocr(request: Request):
+    """
+    API cho Mobile App - Upload ảnh và tự động đọc text bằng OCR
+    Hỗ trợ cả file binary và Base64 string (từ Geelerk)
+    - Form-data field 'file': File binary (Encode as Base64 = No) hoặc Base64 string (Encode as Base64 = Yes)
+    Lưu ảnh và kết quả đọc text vào database
+    """
+    try:
+        import base64
+        import httpx
+        
+        # Xử lý ảnh - hỗ trợ cả file binary và Base64 string
+        image = None
+        image_data = None
+        
+        # Đọc form-data (Geelerk gửi qua form-data)
+        try:
+            form_data = await request.form()
+            
+            # Thử đọc field "file"
+            if 'file' in form_data:
+                file_value = form_data['file']
+                
+                # Trường hợp 1: Base64 string (khi Geelerk Encode as Base64 = Yes)
+                if isinstance(file_value, str) and len(file_value) > 100:
+                    try:
+                        # Loại bỏ data URL prefix nếu có (data:image/png;base64,...)
+                        base64_data = file_value
+                        if ',' in base64_data:
+                            base64_data = base64_data.split(',')[1]
+                        else:
+                            base64_data = base64_data.strip()
+                        image_data = base64.b64decode(base64_data)
+                        image = Image.open(io.BytesIO(image_data))
+                    except Exception as e:
+                        # Không phải Base64 hợp lệ
+                        pass
+                
+                # Trường hợp 2: UploadFile object (khi Geelerk Encode as Base64 = No)
+                elif hasattr(file_value, 'read'):
+                    try:
+                        image_data = await file_value.read()
+                        if image_data and len(image_data) > 0:
+                            image = Image.open(io.BytesIO(image_data))
+                    except Exception as e:
+                        raise HTTPException(status_code=400, detail=f"Không thể đọc file: {str(e)}")
+        except Exception as e:
+            # Nếu không phải form-data, thử đọc như raw body
+            try:
+                body = await request.body()
+                if body and len(body) > 0:
+                    # Thử parse như ảnh binary trực tiếp
+                    image_data = body
+                    image = Image.open(io.BytesIO(body))
+            except:
+                pass
+        
+        if not image or not image_data:
+            raise HTTPException(
+                status_code=400,
+                detail="Không nhận được ảnh hợp lệ. Vui lòng gửi file binary hoặc Base64 string trong field 'file' (form-data)"
+            )
+        
+        # Tạo thư mục lưu ảnh mobile OCR nếu chưa có
+        mobile_ocr_dir = "mobile_images/ocr"
+        os.makedirs(mobile_ocr_dir, exist_ok=True)
+        
+        # Tạo tên file với timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        # Lấy extension từ image format, mặc định là jpg
+        file_extension = image.format.lower() if image.format else 'jpg'
+        if file_extension not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+            file_extension = 'jpg'
+        saved_filename = f"mobile_ocr_{timestamp}.{file_extension}"
+        saved_path = os.path.join(mobile_ocr_dir, saved_filename)
+        
+        # Lưu ảnh
+        image.save(saved_path, quality=95)
+        
+        # Encode ảnh thành Base64 để gửi cho OpenAI
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        
+        # Lấy OpenAI API key từ environment variable hoặc .env file
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        
+        # Nếu không có trong env, thử đọc từ file .env
+        if not openai_api_key:
+            env_file_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+            if os.path.exists(env_file_path):
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('OPENAI_API_KEY='):
+                            openai_api_key = line.split('=', 1)[1].strip()
+                            break
+        
+        if not openai_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="OPENAI_API_KEY chưa được cấu hình. Vui lòng tạo file .env hoặc set biến môi trường OPENAI_API_KEY"
+            )
+        
+        # Gọi ChatGPT Vision API
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}"
+                },
+                json={
+                    "model": "gpt-4o",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": """Extract text from this betting history table image and return in structured format.
+
+IMPORTANT: This is a "LỊCH SỬ CƯỢC" (Betting History) table. Extract these columns in order:
+1. Phiên (Session ID)
+2. Thời gian (Time - format: DD-MM-YYYY HH:MM:SS)
+3. Đặt cược (Bet: Tài or Xỉu)
+4. Kết quả (Result: Tài or Xỉu)
+5. Tổng cược (Total Bet)
+6. Tiền thắng (Winnings)
+7. Thắng/Thua (Win/Loss - calculate this: if Bet=Result → "Thắng", else → "Thua")
+
+Return format (use pipe | as separator):
+Phiên|Thời gian|Đặt cược|Kết quả|Tổng cược|Tiền thắng|Thắng/Thua
+524124|03-11-2025 17:41:46|Tài|Tài|2,000|+1,960|Thắng
+524123|03-11-2025 17:40:45|Tài|Xỉu|1,000|-1,000|Thua
+524122|03-11-2025 17:39:50|Tài|Tài|1,000|+980|Thắng
+524121|03-11-2025 17:38:43|Tài|Xỉu|1,000|-1,000|Thua
+
+Rules:
+- Each row on a new line
+- Use | to separate columns
+- Keep numbers with commas (e.g., 2,000)
+- Keep + or - sign for winnings
+- For "Thắng/Thua": if "Đặt cược" = "Kết quả" then "Thắng", else "Thua"
+- If not a betting table, extract all text normally"""
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                        "detail": "high"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "max_tokens": 4096,
+                    "temperature": 0.1
+                }
+            )
+        
+        if response.status_code != 200:
+            error_detail = response.text
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Lỗi từ OpenAI API (HTTP {response.status_code}): {error_detail}"
+            )
+        
+        result = response.json()
+        extracted_text = result['choices'][0]['message']['content']
+        
+        # Kiểm tra nếu ChatGPT từ chối
+        refusal_phrases = [
+            "I'm sorry",
+            "I can't assist",
+            "I cannot help",
+            "I'm unable to",
+            "I apologize"
+        ]
+        
+        if any(phrase.lower() in extracted_text.lower() for phrase in refusal_phrases):
+            # Log để debug
+            print(f"[OCR Mobile] ChatGPT refusal detected: {extracted_text}")
+            print(f"[OCR Mobile] Full response: {json.dumps(result)}")
+            
+            # Kiểm tra xem có phải do content policy không
+            refusal_detail = f"""OpenAI từ chối xử lý ảnh này.
+
+Response từ ChatGPT: "{extracted_text}"
+
+Nguyên nhân có thể:
+1. ⚠️ Ảnh chứa nội dung liên quan đến cờ bạc/game/casino
+2. ⚠️ Ảnh chứa nội dung nhạy cảm hoặc vi phạm policy
+3. ⚠️ Ảnh không rõ ràng hoặc bị lỗi
+
+Giải pháp:
+- Thử ảnh khác không liên quan đến game/cờ bạc
+- Đảm bảo ảnh rõ nét, không bị mờ
+- Thử crop ảnh để chỉ lấy phần text cần đọc
+
+Hoặc liên hệ admin để được hỗ trợ."""
+            
+            raise HTTPException(
+                status_code=400,
+                detail=refusal_detail
+            )
+        
+        # Lưu vào database
+        conn = sqlite3.connect('logs.db')
+        cursor = conn.cursor()
+        
+        # Tạo table nếu chưa có (thêm image_path nếu chưa có)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ocr_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                extracted_text TEXT NOT NULL,
+                image_path TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Insert result với đường dẫn ảnh
+        cursor.execute("""
+            INSERT INTO ocr_results (extracted_text, image_path)
+            VALUES (?, ?)
+        """, (extracted_text, saved_path))
+        
+        conn.commit()
+        ocr_id = cursor.lastrowid
+        
+        # Cleanup: Xóa các record cũ, chỉ giữ lại 10 mới nhất
+        cursor.execute("""
+            DELETE FROM ocr_results 
+            WHERE id NOT IN (
+                SELECT id FROM ocr_results 
+                ORDER BY created_at DESC 
+                LIMIT 10
+            )
+        """)
+        conn.commit()
+        conn.close()
+        
+        # ==================== TỰ ĐỘNG LƯU SESSION DATA ====================
+        # Parse OCR text thành sessions và tự động lưu vào session_history
+        sessions_saved = 0
+        latest_session_id = None
+        try:
+            sessions = session_service.parse_ocr_text(extracted_text)
+            
+            if sessions and len(sessions) > 0:
+                # Sắp xếp theo thời gian để tìm phiên mới nhất
+                def parse_time(time_str):
+                    try:
+                        return datetime.strptime(time_str, "%d-%m-%Y %H:%M:%S")
+                    except:
+                        return datetime.min
+                
+                sessions_sorted = sorted(sessions, key=lambda s: parse_time(s['session_time']), reverse=True)
+                
+                # Lưu phiên mới nhất
+                latest_session = sessions_sorted[0]
+                saved = session_service.add_session(latest_session, saved_path)
+                
+                if saved:
+                    sessions_saved = 1
+                    latest_session_id = latest_session['session_id']
+                    print(f"[Mobile OCR] ✅ Đã lưu phiên mới: {latest_session_id}")
+                else:
+                    print(f"[Mobile OCR] ⚠️ Phiên {latest_session['session_id']} đã tồn tại")
+        except Exception as e:
+            print(f"[Mobile OCR] ❌ Lỗi parse/lưu session: {str(e)}")
+            # Không raise exception, vẫn trả về response OCR thành công
+        
+        return {
+            "success": True,
+            "ocr_id": ocr_id,
+            "text": extracted_text,
+            "image_path": saved_path,
+            "message": f"Đọc text thành công từ ảnh mobile (ID: {ocr_id})",
+            "sessions_saved": sessions_saved,
+            "latest_session_id": latest_session_id
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi đọc text từ ảnh mobile: {str(e)}")
+
+
+@app.post("/api/mobile/analyze")
+async def mobile_analyze(
+    file: UploadFile = File(...),
+    device_name: str = Form(...),
+    betting_method: str = Form(...)
+):
+    """
+    API chính cho Mobile - Nhận ảnh và phân tích
+    
+    Args:
+        file: Screenshot từ mobile (betting history hoặc betting screen)
+        device_name: Tên thiết bị (để track state riêng biệt)
+        betting_method: "Tài" hoặc "Xỉu"
+    
+    Returns:
+        JSON với thông tin phân tích và hệ số cược cho phiên tiếp theo
+    """
+    try:
+        import httpx
+        import base64
+        
+        # Đọc ảnh
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+        
+        # Lưu ảnh
+        mobile_dir = "mobile_images/run_mobile"
+        os.makedirs(mobile_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_extension = image.format.lower() if image.format else 'jpg'
+        if file_extension not in ['jpg', 'jpeg', 'png']:
+            file_extension = 'jpg'
+        saved_filename = f"mobile_{device_name}_{timestamp}.{file_extension}"
+        saved_path = os.path.join(mobile_dir, saved_filename)
+        image.save(saved_path, quality=95)
+        
+        # Encode ảnh
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        
+        # Get OpenAI API key
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not openai_api_key:
+            env_file_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+            if os.path.exists(env_file_path):
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('OPENAI_API_KEY='):
+                            openai_api_key = line.split('=', 1)[1].strip()
+                            break
+        
+        if not openai_api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY chưa được cấu hình")
+        
+        # Prompt ChatGPT để detect loại ảnh và extract data
+        # Dùng ngôn ngữ trung lập để tránh bị từ chối
+        detection_prompt = """Phân tích ảnh giao diện game và xác định loại:
+
+**LOẠI 1 - POPUP LỊCH SỬ:**
+- Có tiêu đề "LỊCH SỬ" ở trên cùng
+- Có bảng với nhiều dòng
+- Mỗi dòng có 5 cột: Phiên, Thời gian, Số lượng, Kết quả, Chi tiết
+- Cột kết quả có màu: xanh (+), đỏ (-), hoặc chỉ dấu gạch (-)
+- Ví dụ: #526653 | 05-11-2025 04:48:56 | 2,000 | -2,000 | Chọn Tài
+
+**LOẠI 2 - MÀN HÌNH GAME:**
+- Có chữ TÀI và XỈU lớn
+- Có số giây đếm ngược trong vòng tròn màu vàng
+- Có các nút số: 1K, 10K, 50K...
+- Có nút hành động
+
+---
+
+Nếu là LOẠI 1 (POPUP), đọc CHỈ dòng ĐẦU TIÊN:
+```
+TYPE: HISTORY
+Phiên: #[số]
+Thời gian: [DD-MM-YYYY HH:MM:SS]
+Số lượng: [số]
+Kết quả: [+số / -số / -]
+Chi tiết: [text]
+```
+
+Nếu là LOẠI 2 (MÀN HÌNH):
+```
+TYPE: GAME
+Giây: [số trong vòng tròn]
+Số lượng: [số màu trắng dưới TÀI/XỈU]
+Trạng thái: [Active/Inactive]
+```"""
+
+        # Call ChatGPT
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": detection_prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "low"
+                            }}
+                        ]
+                    }],
+                    "temperature": 0,
+                    "max_tokens": 300
+                }
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, 
+                                    detail=f"Lỗi ChatGPT: {response.text}")
+            
+            result = response.json()
+            chatgpt_text = result['choices'][0]['message']['content']
+        
+        # Parse ChatGPT response để detect loại ảnh
+        is_history = "TYPE: HISTORY" in chatgpt_text
+        is_betting = "TYPE: GAME" in chatgpt_text or "TYPE: BETTING" in chatgpt_text
+        
+        response_data = {
+            "device_name": device_name,
+            "betting_method": betting_method,
+            "image_path": saved_path,
+            "chatgpt_response": chatgpt_text
+        }
+        
+        # XỬ LÝ LOẠI 1: POPUP LỊCH SỬ CƯỢC
+        if is_history:
+            # Parse thông tin dòng đầu tiên (phiên mới nhất)
+            import re
+            
+            # Parse các field (dùng cả 2 format: cũ và mới)
+            session_match = re.search(r'Phiên:\s*#?(\d+)', chatgpt_text)
+            time_match = re.search(r'Thời gian:\s*(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})', chatgpt_text)
+            bet_match = re.search(r'(?:Tổng cược|Số lượng):\s*([\d,]+)', chatgpt_text)
+            win_loss_text_match = re.search(r'(?:Tiền thắng|Kết quả):\s*([+\-]?\d+|[\-])', chatgpt_text)
+            detail_match = re.search(r'Chi tiết:\s*(.+)', chatgpt_text)
+            
+            session_id = f"#{session_match.group(1)}" if session_match else None
+            session_time = time_match.group(1) if time_match else None
+            bet_amount = int(bet_match.group(1).replace(',', '')) if bet_match else 0
+            win_loss_text = win_loss_text_match.group(1) if win_loss_text_match else None
+            detail = detail_match.group(1) if detail_match else ""
+            
+            # Xác định Thắng/Thua từ Kết quả (support cả 2 format)
+            win_loss = None
+            
+            # Check Status field (format mới)
+            status_match = re.search(r'Status:\s*(Positive|Negative|Pending)', chatgpt_text)
+            if status_match:
+                status = status_match.group(1)
+                if status == 'Positive':
+                    win_loss = 'Thắng'
+                elif status == 'Negative':
+                    win_loss = 'Thua'
+                else:  # Pending
+                    win_loss = None
+            # Fallback: Parse từ số (format cũ)
+            elif win_loss_text:
+                if win_loss_text == '-':
+                    win_loss = None
+                elif win_loss_text.startswith('+'):
+                    win_loss = 'Thắng'
+                elif win_loss_text.startswith('-') and len(win_loss_text) > 1:
+                    win_loss = 'Thua'
+            
+            # Tính hệ số cược cho phiên tiếp theo
+            multiplier = mobile_betting_service.calculate_multiplier(device_name, win_loss, bet_amount)
+            
+            # Lưu lịch sử
+            mobile_betting_service.save_analysis_history({
+                'device_name': device_name,
+                'betting_method': betting_method,
+                'session_id': session_id,
+                'image_type': 'HISTORY',
+                'seconds_remaining': None,
+                'bet_amount': bet_amount,
+                'bet_status': None,
+                'win_loss': win_loss,
+                'multiplier': multiplier,
+                'image_path': saved_path,
+                'chatgpt_response': chatgpt_text
+            })
+            
+            # Get device state để check warnings
+            device_state = mobile_betting_service.get_device_state(device_name)
+            
+            # Check if needs verification
+            needs_verification = (
+                multiplier >= 8 or  # High multiplier
+                device_state['lose_streak_count'] >= 3 or  # Long lose streak
+                device_state['rest_mode']  # In rest mode
+            )
+            
+            response_data.update({
+                "image_type": "HISTORY",
+                "session_id": session_id,
+                "session_time": session_time,
+                "bet_amount": bet_amount,
+                "win_loss": win_loss,
+                "multiplier": multiplier,
+                "verification": {
+                    "required": needs_verification,
+                    "threshold": 0.85,
+                    "reason": "high_multiplier" if multiplier >= 8 else (
+                        "lose_streak" if device_state['lose_streak_count'] >= 3 else (
+                            "rest_mode" if device_state['rest_mode'] else None
+                        )
+                    )
+                },
+                "device_state": {
+                    "lose_streak": device_state['lose_streak_count'],
+                    "rest_mode": device_state['rest_mode'],
+                    "rest_counter": device_state['rest_counter']
+                }
+            })
+        
+        # XỬ LÝ LOẠI 2: MÀN HÌNH GAME
+        elif is_betting:
+            import re
+            
+            # LƯU Ý: KHÔNG parse số phiên từ màn hình game (không chính xác)
+            seconds_match = re.search(r'Giây:\s*(\d+)', chatgpt_text)
+            bet_match = re.search(r'(?:Tiền cược|Số lượng):\s*([\d,]+)', chatgpt_text)
+            status_match = re.search(r'Trạng thái:\s*(Active|Inactive|Đã cược|Chưa cược)', chatgpt_text)
+            
+            session_id = None  # Không lấy số phiên từ màn hình cược
+            seconds = int(seconds_match.group(1)) if seconds_match else 0
+            bet_amount = int(bet_match.group(1).replace(',', '')) if bet_match else 0
+            bet_status = status_match.group(1) if status_match else "Chưa cược"
+            
+            # Lưu lịch sử
+            mobile_betting_service.save_analysis_history({
+                'device_name': device_name,
+                'betting_method': betting_method,
+                'session_id': session_id,
+                'image_type': 'BETTING',
+                'seconds_remaining': seconds,
+                'bet_amount': bet_amount,
+                'bet_status': bet_status,
+                'win_loss': None,
+                'multiplier': None,
+                'image_path': saved_path,
+                'chatgpt_response': chatgpt_text
+            })
+            
+            response_data.update({
+                "image_type": "BETTING",
+                "session_id": None,  # Không có từ màn hình cược
+                "seconds": seconds,
+                "bet_amount": bet_amount,
+                "bet_status": bet_status,
+                "note": "Session ID không chính xác từ màn hình cược - dùng popup để verify"
+            })
+        
+        else:
+            # Không detect được loại ảnh
+            response_data.update({
+                "image_type": "UNKNOWN",
+                "multiplier": 0
+            })
+        
+        return response_data
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"[Mobile Analyze Error] {error_trace}")
+        raise HTTPException(status_code=500, detail=f"Lỗi phân tích mobile: {str(e)}")
+
+
+@app.get("/api/mobile/history")
+async def get_mobile_history(limit: int = 50):
+    """Lấy lịch sử phân tích mobile"""
+    try:
+        history = mobile_betting_service.get_analysis_history(limit=limit)
+        return {
+            "success": True,
+            "total": len(history),
+            "history": history
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử: {str(e)}")
+
+
+@app.get("/api/mobile/device-state/{device_name}")
+async def get_device_state(device_name: str):
+    """Lấy state của device cụ thể"""
+    try:
+        state = mobile_betting_service.get_device_state(device_name)
+        return {
+            "success": True,
+            "state": state
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy state: {str(e)}")
+
+
+@app.get("/api/mobile/result/{device_name}")
+async def get_mobile_result(device_name: str):
+    """
+    GET API cho mobile lấy kết quả phân tích mới nhất
+    
+    Mobile gọi API này sau khi POST ảnh lên để nhận kết quả JSON
+    """
+    try:
+        # Lấy kết quả phân tích mới nhất của device này
+        conn = sqlite3.connect('logs.db')
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT device_name, betting_method, session_id, image_type,
+                   seconds_remaining, bet_amount, bet_status, win_loss, multiplier,
+                   created_at
+            FROM mobile_analysis_history
+            WHERE device_name = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (device_name,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row:
+            return {
+                "success": False,
+                "message": f"Không tìm thấy kết quả cho device {device_name}"
+            }
+        
+        # Build response dựa vào loại ảnh
+        response_data = {
+            "success": True,
+            "device_name": row[0],
+            "betting_method": row[1],
+            "image_type": row[3]
+        }
+        
+        # Nếu là ảnh lịch sử cược
+        if row[3] == 'HISTORY':
+            response_data.update({
+                "session_id": row[2],
+                "session_time": row[9],  # created_at as proxy for session_time
+                "bet_amount": row[5],
+                "win_loss": row[7],
+                "multiplier": row[8]
+            })
+        
+        # Nếu là ảnh màn hình cược
+        elif row[3] == 'BETTING':
+            response_data.update({
+                "session_id": row[2],
+                "seconds": row[4],
+                "bet_amount": row[5],
+                "bet_status": row[6]
+            })
+        
+        return response_data
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy kết quả: {str(e)}")
+
+
+@app.post("/api/mobile/verify-quick")
+async def verify_quick(
+    file: UploadFile = File(...),
+    device_name: str = Form(...),
+    expected_amount: int = Form(...)
+):
+    """
+    Quick Verification - Verify nhanh sau khi tap "Đặt cược"
+    
+    Chỉ check số tiền từ màn hình cược
+    Không dùng số phiên (không chính xác)
+    
+    Returns: confidence score + match status
+    """
+    try:
+        import httpx
+        import base64
+        import re
+        
+        # Read image
+        image_data = await file.read()
+        
+        # Save image
+        mobile_dir = "mobile_images/verify_quick"
+        os.makedirs(mobile_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        saved_path = os.path.join(mobile_dir, f"verify_{device_name}_{timestamp}.jpg")
+        
+        with open(saved_path, 'wb') as f:
+            f.write(image_data)
+        
+        # Encode to base64
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        
+        # Get OpenAI API key
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not openai_api_key:
+            env_file_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+            if os.path.exists(env_file_path):
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('OPENAI_API_KEY='):
+                            openai_api_key = line.split('=', 1)[1].strip()
+                            break
+        
+        if not openai_api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY chưa được cấu hình")
+        
+        # Prompt đơn giản - CHỈ đọc số lượng (tránh từ "cược")
+        prompt = """Đây là giao diện game. Đọc số lượng hiển thị:
+
+Tìm số màu TRẮNG nằm DƯỚI chữ TÀI hoặc XỈU (không phải số trong khung).
+
+Trả về CHỈ 1 dòng:
+Số lượng: [số]
+
+Ví dụ: 
+Số lượng: 2000
+hoặc
+Số lượng: 0"""
+
+        # Call ChatGPT
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "low"
+                            }}
+                        ]
+                    }],
+                    "temperature": 0,
+                    "max_tokens": 100
+                }
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, 
+                                    detail=f"Lỗi ChatGPT: {response.text}")
+            
+            result = response.json()
+            chatgpt_text = result['choices'][0]['message']['content']
+        
+        # Parse số lượng (support cả 2 format)
+        money_match = re.search(r'(?:Tiền cược|Số lượng):\s*([\d,]+)', chatgpt_text)
+        detected_amount = 0
+        if money_match:
+            detected_amount = int(money_match.group(1).replace(',', ''))
+        
+        # Calculate confidence
+        amount_match = (detected_amount == expected_amount)
+        confidence = 1.0 if amount_match else 0.3
+        
+        # Log verification
+        mobile_betting_service.save_verification_log({
+            'device_name': device_name,
+            'session_id': None,
+            'verification_type': 'quick',
+            'expected_amount': expected_amount,
+            'detected_amount': detected_amount,
+            'confidence': confidence,
+            'match_status': amount_match,
+            'screenshot_path': saved_path,
+            'chatgpt_response': chatgpt_text
+        })
+        
+        # Check if needs popup verify
+        needs_popup = confidence < 0.85
+        
+        return {
+            "verified": amount_match,
+            "confidence": confidence,
+            "detected_amount": detected_amount,
+            "expected_amount": expected_amount,
+            "needs_popup_verify": needs_popup,
+            "screenshot_path": saved_path
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"[Verify Quick Error] {error_trace}")
+        raise HTTPException(status_code=500, detail=f"Lỗi verify quick: {str(e)}")
+
+
+@app.post("/api/mobile/verify-popup")
+async def verify_popup(
+    file: UploadFile = File(...),
+    device_name: str = Form(...),
+    expected_amount: int = Form(...),
+    expected_method: str = Form(...),
+    current_session: str = Form(default="")
+):
+    """
+    Popup Verification - Verify chắc chắn qua popup lịch sử
+    
+    Đọc dòng đầu tiên trong popup
+    So sánh: phiên, số tiền, phương thức
+    Confidence = 1.0 nếu match
+    
+    Returns: verified status + details
+    """
+    try:
+        import httpx
+        import base64
+        import re
+        
+        # Read image
+        image_data = await file.read()
+        
+        # Save image
+        mobile_dir = "mobile_images/verify_popup"
+        os.makedirs(mobile_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        saved_path = os.path.join(mobile_dir, f"popup_{device_name}_{timestamp}.jpg")
+        
+        with open(saved_path, 'wb') as f:
+            f.write(image_data)
+        
+        # Encode to base64
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        
+        # Get OpenAI API key
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not openai_api_key:
+            env_file_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+            if os.path.exists(env_file_path):
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('OPENAI_API_KEY='):
+                            openai_api_key = line.split('=', 1)[1].strip()
+                            break
+        
+        if not openai_api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY chưa được cấu hình")
+        
+        # Prompt cho popup - CHỈ dòng đầu tiên (ngôn ngữ trung lập)
+        prompt = """Đây là popup lịch sử trong game. Đọc CHỈ dòng ĐẦU TIÊN (mới nhất):
+
+Format trả về:
+Phiên: #[số]
+Số lượng: [số]
+Kết quả: [+số / -số / -]
+Chi tiết: [text]
+
+Lưu ý: Nếu "Kết quả" chỉ là dấu gạch "-" nghĩa là đang chờ."""
+
+        # Call ChatGPT
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "low"
+                            }}
+                        ]
+                    }],
+                    "temperature": 0,
+                    "max_tokens": 200
+                }
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, 
+                                    detail=f"Lỗi ChatGPT: {response.text}")
+            
+            result = response.json()
+            chatgpt_text = result['choices'][0]['message']['content']
+        
+        # Parse kết quả (support cả 2 format)
+        session_match = re.search(r'Phiên:\s*#?(\d+)', chatgpt_text)
+        amount_match = re.search(r'(?:Tổng cược|Số lượng):\s*([\d,]+)', chatgpt_text)
+        win_loss_match = re.search(r'(?:Tiền thắng|Kết quả):\s*([+\-]?\d+|[\-])', chatgpt_text)
+        detail_match = re.search(r'Chi tiết:\s*(.+)', chatgpt_text)
+        
+        detected_session = f"#{session_match.group(1)}" if session_match else None
+        detected_amount = 0
+        if amount_match:
+            detected_amount = int(amount_match.group(1).replace(',', ''))
+        
+        detected_win_loss = win_loss_match.group(1) if win_loss_match else None
+        detected_detail = detail_match.group(1) if detail_match else ""
+        
+        # Check method từ chi tiết
+        detected_method = None
+        if "Tài" in detected_detail:
+            detected_method = "Tài"
+        elif "Xỉu" in detected_detail:
+            detected_method = "Xỉu"
+        
+        # Calculate confidence
+        checks = []
+        
+        # Check 1: Amount match
+        amount_ok = (detected_amount == expected_amount)
+        checks.append(('amount_match', amount_ok))
+        
+        # Check 2: Method match
+        method_ok = (detected_method == expected_method) if detected_method else None
+        if method_ok is not None:
+            checks.append(('method_match', method_ok))
+        
+        # Check 3: Pending status (tiền thắng = "-")
+        pending_ok = (detected_win_loss == '-')
+        checks.append(('pending_status', pending_ok))
+        
+        # Tính confidence
+        passed = sum(1 for _, ok in checks if ok)
+        total = len(checks)
+        confidence = passed / total if total > 0 else 0.0
+        
+        verified = (confidence >= 0.8)
+        
+        # Log verification
+        mobile_betting_service.save_verification_log({
+            'device_name': device_name,
+            'session_id': detected_session,
+            'verification_type': 'popup',
+            'expected_amount': expected_amount,
+            'detected_amount': detected_amount,
+            'confidence': confidence,
+            'match_status': verified,
+            'screenshot_path': saved_path,
+            'chatgpt_response': chatgpt_text
+        })
+        
+        # Handle mismatch nếu có
+        if not amount_ok and detected_amount > 0:
+            mobile_betting_service.handle_mismatch(
+                device_name,
+                expected_amount,
+                detected_amount,
+                detected_session
+            )
+        
+        return {
+            "verified": verified,
+            "confidence": confidence,
+            "session_match": True,  # Popup luôn có session
+            "amount_match": amount_ok,
+            "method_match": method_ok if method_ok is not None else True,
+            "status": "pending_result" if pending_ok else "unknown",
+            "detected_session": detected_session,
+            "detected_amount": detected_amount,
+            "detected_method": detected_method,
+            "mismatch_details": None if amount_ok else f"Expected {expected_amount}, got {detected_amount}",
+            "screenshot_path": saved_path
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"[Verify Popup Error] {error_trace}")
+        raise HTTPException(status_code=500, detail=f"Lỗi verify popup: {str(e)}")
+
+
+@app.post("/api/analyze-image-with-chatgpt")
+async def analyze_image_with_chatgpt(file: UploadFile = File(...)):
+    """
+    Phân tích ảnh trực tiếp với ChatGPT Vision API
+    """
+    try:
+        import httpx
+        import base64
+        
+        # Read image
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+        
+        # Encode to base64
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        
+        # Get OpenAI API key
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        
+        if not openai_api_key:
+            env_file_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+            if os.path.exists(env_file_path):
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('OPENAI_API_KEY='):
+                            openai_api_key = line.split('=', 1)[1].strip()
+                            break
+        
+        if not openai_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="OPENAI_API_KEY chưa được cấu hình"
+            )
+        
+        # ====== PROMPT CHO ẢNH MÀN HÌNH CƯỢC ======
+        # LƯU Ý: KHÔNG ĐỌC số phiên từ màn hình cược (không chính xác)
+        prompt_betting_screen = """Đây là giao diện game Tài Xỉu. Trích xuất thông tin:
+
+1. **Giây còn lại**: Số to màu vàng trong vòng tròn ở giữa
+   - Ví dụ: 2, 16, 26, 42...
+
+2. **Số lượng**: Số màu TRẮNG dưới chữ TÀI hoặc XỈU
+   - Số trong khung: bỏ qua
+   - Số màu trắng DƯỚI khung: đây là giá trị hiện tại
+   - Ví dụ: 0, 1000, 2000, 4000...
+
+3. **Trạng thái**: 
+   - Nếu có số > 0 dưới khung → "Active"
+   - Nếu = 0 hoặc không có → "Inactive"
+
+Format trả về:
+Giây: [số]
+Số lượng: [số]
+Trạng thái: [Active / Inactive]
+
+LƯU Ý: KHÔNG đọc số phiên từ ảnh này."""
+        
+        # ====== PROMPT CHO ẢNH POPUP LỊCH SỬ ======
+        prompt_history_popup = """Đây là popup lịch sử hoạt động trong game. Đọc dòng ĐẦU TIÊN (mới nhất):
+
+Các cột trong bảng:
+1. Phiên: Số có dấu # (vd: #526653, #524124...)
+2. Thời gian: DD-MM-YYYY HH:MM:SS
+3. Số lượng: Giá trị số (vd: 1,000, 2,000...)
+4. Kết quả: 
+   - Số xanh (+): Positive (vd: +1,960)
+   - Số đỏ (-): Negative (vd: -1,000)
+   - Dấu gạch (-): Đang chờ
+5. Chi tiết: Text mô tả
+
+Format trả về CHỈ DÒNG ĐẦU:
+Phiên: #[số]
+Thời gian: [DD-MM-YYYY HH:MM:SS]
+Số lượng: [số]
+Kết quả: [+số / -số / -]
+Status: [Positive / Negative / Pending]
+
+Nếu Kết quả = "-" (chỉ dấu gạch) → Status = "Pending"
+Nếu Kết quả dương (+) → Status = "Positive"
+Nếu Kết quả âm (-số) → Status = "Negative" """
+        
+        # Chọn prompt dựa vào loại ảnh (sẽ detect tự động)
+        prompt = prompt_history_popup  # Default
+
+        # Call ChatGPT Vision API
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                        "detail": "low"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 300
+                }
+            )
+            
+            if response.status_code != 200:
+                error_detail = response.text
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Lỗi từ OpenAI API: {error_detail}"
+                )
+            
+            result = response.json()
+            extracted_text = result['choices'][0]['message']['content']
+            
+            return {
+                "success": True,
+                "analysis": extracted_text,
+                "text": extracted_text,
+                "model": "gpt-4o-mini",
+                "message": "Đọc text thành công với ChatGPT Vision"
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"[ChatGPT Vision Error] {error_trace}")
+        raise HTTPException(status_code=500, detail=f"Lỗi phân tích ảnh: {str(e)}")
+
+
+@app.post("/api/analyze-with-chatgpt")
+async def analyze_with_chatgpt(request: Request):
+    """
+    Phân tích text với ChatGPT API
+    """
+    try:
+        import httpx
+        
+        # Get request body
+        body = await request.json()
+        text = body.get('text', '')
+        
+        if not text:
+            raise HTTPException(status_code=400, detail="Text không được để trống")
+        
+        # Get OpenAI API key
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        
+        if not openai_api_key:
+            env_file_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+            if os.path.exists(env_file_path):
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('OPENAI_API_KEY='):
+                            openai_api_key = line.split('=', 1)[1].strip()
+                            break
+        
+        if not openai_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="OPENAI_API_KEY chưa được cấu hình"
+            )
+        
+        # Create analysis prompt
+        prompt = f"""Bạn là chuyên gia phân tích dữ liệu cá cược. Hãy phân tích chi tiết bảng lịch sử cược sau đây:
+
+{text}
+
+Hãy đưa ra phân tích bao gồm:
+1. **Tổng quan**: Số phiên, tổng tiền cược, tổng tiền thắng/thua
+2. **Thống kê**: Tỷ lệ thắng/thua, phiên thắng liên tiếp, phiên thua liên tiếp
+3. **Xu hướng**: Phát hiện patterns, xu hướng đặt cược
+4. **Nhận xét**: Đánh giá chiến lược, đưa ra lời khuyên
+
+Trả lời bằng tiếng Việt, chi tiết và dễ hiểu."""
+
+        # Call ChatGPT API
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Bạn là chuyên gia phân tích dữ liệu và thống kê. Hãy đưa ra phân tích chi tiết, chính xác và hữu ích."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 2000
+                }
+            )
+            
+            if response.status_code != 200:
+                error_detail = response.text
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Lỗi từ OpenAI API: {error_detail}"
+                )
+            
+            result = response.json()
+            analysis = result['choices'][0]['message']['content']
+            
+            return {
+                "success": True,
+                "analysis": analysis,
+                "model": "gpt-4o-mini",
+                "message": "Phân tích thành công với ChatGPT"
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"[ChatGPT Analysis Error] {error_trace}")
+        raise HTTPException(status_code=500, detail=f"Lỗi phân tích: {str(e)}")
+
+
+@app.post("/upload/azure-ocr")
+async def upload_azure_ocr(file: UploadFile = File(...)):
+    """
+    API cho Azure Computer Vision OCR
+    Upload ảnh và đọc text bằng Microsoft Azure Computer Vision
+    """
+    try:
+        import httpx
+        import base64
+        
+        # Đọc ảnh
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+        
+        # Lưu ảnh để có thể review lại sau
+        azure_ocr_dir = "mobile_images/azure_ocr"
+        os.makedirs(azure_ocr_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_extension = image.format.lower() if image.format else 'jpg'
+        if file_extension not in ['jpg', 'jpeg', 'png', 'gif', 'bmp']:
+            file_extension = 'jpg'
+        saved_filename = f"azure_ocr_{timestamp}.{file_extension}"
+        saved_path = os.path.join(azure_ocr_dir, saved_filename)
+        
+        image.save(saved_path, quality=95)
+        
+        # Lấy Azure credentials từ environment
+        azure_key = os.getenv('AZURE_COMPUTER_VISION_KEY')
+        azure_endpoint = os.getenv('AZURE_COMPUTER_VISION_ENDPOINT')
+        
+        # Nếu không có trong env, thử đọc từ file .env
+        if not azure_key or not azure_endpoint:
+            env_file_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+            if os.path.exists(env_file_path):
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('AZURE_COMPUTER_VISION_KEY='):
+                            azure_key = line.split('=', 1)[1].strip()
+                        elif line.startswith('AZURE_COMPUTER_VISION_ENDPOINT='):
+                            azure_endpoint = line.split('=', 1)[1].strip()
+        
+        if not azure_key or not azure_endpoint:
+            raise HTTPException(
+                status_code=500,
+                detail="Azure credentials chưa được cấu hình. Vui lòng thêm AZURE_COMPUTER_VISION_KEY và AZURE_COMPUTER_VISION_ENDPOINT vào file .env"
+            )
+        
+        # Ensure endpoint ends with /
+        if not azure_endpoint.endswith('/'):
+            azure_endpoint += '/'
+        
+        # Gọi Azure Computer Vision OCR API (Read API)
+        # Sử dụng Read 3.2 API
+        analyze_url = f"{azure_endpoint}vision/v3.2/read/analyze"
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # Step 1: Submit image for analysis
+            response = await client.post(
+                analyze_url,
+                headers={
+                    "Ocp-Apim-Subscription-Key": azure_key,
+                    "Content-Type": "application/octet-stream"
+                },
+                content=image_data
+                # Azure sẽ tự động detect ngôn ngữ
+            )
+            
+            if response.status_code != 202:
+                error_detail = response.text
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Lỗi từ Azure API (HTTP {response.status_code}): {error_detail}"
+                )
+            
+            # Get operation location from response headers
+            operation_location = response.headers.get('Operation-Location')
+            if not operation_location:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Azure API không trả về Operation-Location"
+                )
+            
+            # Step 2: Poll for result
+            import asyncio
+            max_attempts = 30
+            attempt = 0
+            
+            while attempt < max_attempts:
+                await asyncio.sleep(1)  # Wait 1 second between polls
+                
+                result_response = await client.get(
+                    operation_location,
+                    headers={
+                        "Ocp-Apim-Subscription-Key": azure_key
+                    }
+                )
+                
+                if result_response.status_code != 200:
+                    raise HTTPException(
+                        status_code=result_response.status_code,
+                        detail=f"Lỗi lấy kết quả từ Azure: {result_response.text}"
+                    )
+                
+                result = result_response.json()
+                status = result.get('status')
+                
+                if status == 'succeeded':
+                    # Extract text from result
+                    read_results = result.get('analyzeResult', {}).get('readResults', [])
+                    
+                    extracted_lines = []
+                    all_text = ""
+                    detected_language = "vi"  # Default
+                    avg_confidence = 0.0
+                    
+                    for page in read_results:
+                        if 'language' in page:
+                            detected_language = page['language']
+                        
+                        lines = page.get('lines', [])
+                        for line in lines:
+                            text = line.get('text', '')
+                            confidence = line.get('confidence', 0.0) if 'confidence' in line else 1.0
+                            extracted_lines.append({
+                                'text': text,
+                                'confidence': confidence
+                            })
+                            all_text += text + "\n"
+                            avg_confidence += confidence
+                    
+                    if len(extracted_lines) > 0:
+                        avg_confidence = avg_confidence / len(extracted_lines)
+                    
+                    # Lưu vào database (optional)
+                    try:
+                        conn = sqlite3.connect('logs.db')
+                        cursor = conn.cursor()
+                        
+                        cursor.execute("""
+                            CREATE TABLE IF NOT EXISTS azure_ocr_results (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                extracted_text TEXT NOT NULL,
+                                language TEXT,
+                                confidence REAL,
+                                image_path TEXT,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """)
+                        
+                        cursor.execute("""
+                            INSERT INTO azure_ocr_results (extracted_text, language, confidence, image_path)
+                            VALUES (?, ?, ?, ?)
+                        """, (all_text.strip(), detected_language, avg_confidence, saved_path))
+                        
+                        conn.commit()
+                        ocr_id = cursor.lastrowid
+                        
+                        # Cleanup: Keep only 50 latest records
+                        cursor.execute("""
+                            DELETE FROM azure_ocr_results 
+                            WHERE id NOT IN (
+                                SELECT id FROM azure_ocr_results 
+                                ORDER BY created_at DESC 
+                                LIMIT 50
+                            )
+                        """)
+                        conn.commit()
+                        conn.close()
+                    except Exception as db_error:
+                        print(f"[Azure OCR] Warning: Database save failed: {str(db_error)}")
+                        ocr_id = None
+                    
+                    return {
+                        "success": True,
+                        "ocr_id": ocr_id,
+                        "text": all_text.strip(),
+                        "language": detected_language,
+                        "confidence": avg_confidence,
+                        "lines_count": len(extracted_lines),
+                        "image_path": saved_path,
+                        "message": "Đọc text thành công bằng Azure Computer Vision"
+                    }
+                    
+                elif status == 'failed':
+                    error_msg = result.get('analyzeResult', {}).get('errors', [])
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Azure OCR failed: {error_msg}"
+                    )
+                
+                attempt += 1
+            
+            # Timeout after max attempts
+            raise HTTPException(
+                status_code=408,
+                detail="Timeout waiting for Azure OCR result. Please try again."
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"[Azure OCR Error] {error_trace}")
+        raise HTTPException(status_code=500, detail=f"Lỗi Azure OCR: {str(e)}")
+
+
 # Alias endpoint (giữ lại để tương thích)
 @app.post("/api/pixel-detector/analyze-mobile")
 async def analyze_for_mobile(file: UploadFile = File(...)):
@@ -1429,6 +2860,26 @@ async def analyze_image_ocr(file: UploadFile = File(...)):
         
         # Đọc ảnh
         image_data = await file.read()
+        
+        # Lưu ảnh vào thư mục để review lại sau
+        ocr_images_dir = "mobile_images/ocr"
+        os.makedirs(ocr_images_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        # Lấy extension từ filename
+        file_extension = "jpg"
+        if file.filename:
+            ext = os.path.splitext(file.filename)[1].lstrip(".")
+            if ext in ["png", "jpg", "jpeg", "webp", "gif"]:
+                file_extension = ext
+        
+        saved_filename = f"ocr_{timestamp}.{file_extension}"
+        saved_path = os.path.join(ocr_images_dir, saved_filename)
+        
+        # Lưu ảnh
+        with open(saved_path, "wb") as f:
+            f.write(image_data)
+        
         base64_image = base64.b64encode(image_data).decode('utf-8')
         
         # Lấy OpenAI API key từ environment variable hoặc .env file
@@ -1557,29 +3008,48 @@ Hoặc liên hệ admin để được hỗ trợ."""
         conn = sqlite3.connect('logs.db')
         cursor = conn.cursor()
         
-        # Tạo table nếu chưa có
+        # Tạo table nếu chưa có (với image_path)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ocr_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 extracted_text TEXT NOT NULL,
+                image_path TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
-        # Insert result
+        # Thử thêm column image_path nếu chưa có (cho DB cũ)
+        try:
+            cursor.execute("ALTER TABLE ocr_results ADD COLUMN image_path TEXT")
+        except:
+            pass  # Column đã tồn tại
+        
+        # Insert result với đường dẫn ảnh
         cursor.execute("""
-            INSERT INTO ocr_results (extracted_text)
-            VALUES (?)
-        """, (extracted_text,))
+            INSERT INTO ocr_results (extracted_text, image_path)
+            VALUES (?, ?)
+        """, (extracted_text, saved_path))
         
         conn.commit()
         ocr_id = cursor.lastrowid
+        
+        # Cleanup: Xóa các record cũ, chỉ giữ lại 10 mới nhất
+        cursor.execute("""
+            DELETE FROM ocr_results 
+            WHERE id NOT IN (
+                SELECT id FROM ocr_results 
+                ORDER BY created_at DESC 
+                LIMIT 10
+            )
+        """)
+        conn.commit()
         conn.close()
         
         return {
             "success": True,
             "ocr_id": ocr_id,
             "text": extracted_text,
+            "image_path": saved_path,
             "message": "Đọc text thành công"
         }
     
@@ -1596,18 +3066,26 @@ async def get_ocr_history(limit: int = Query(10, description="Số lượng kế
         conn = sqlite3.connect('logs.db')
         cursor = conn.cursor()
         
-        # Tạo table nếu chưa có
+        # Tạo table nếu chưa có, thêm image_path column
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ocr_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 extracted_text TEXT NOT NULL,
+                image_path TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Thử thêm column image_path nếu chưa có (cho DB cũ)
+        try:
+            cursor.execute("ALTER TABLE ocr_results ADD COLUMN image_path TEXT")
+        except:
+            pass  # Column đã tồn tại
+        
         conn.commit()
         
         cursor.execute("""
-            SELECT id, extracted_text, created_at
+            SELECT id, extracted_text, image_path, created_at
             FROM ocr_results
             ORDER BY created_at DESC
             LIMIT ?
@@ -1618,7 +3096,8 @@ async def get_ocr_history(limit: int = Query(10, description="Số lượng kế
             history.append({
                 "id": row[0],
                 "extracted_text": row[1],
-                "created_at": row[2]
+                "image_path": row[2],
+                "created_at": row[3]
             })
         
         conn.close()
@@ -1633,13 +3112,287 @@ async def get_ocr_history(limit: int = Query(10, description="Số lượng kế
         raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử: {str(e)}")
 
 
+@app.get("/api/ocr/image/{ocr_id}")
+async def get_ocr_image(ocr_id: int):
+    """
+    Xem lại ảnh đã upload từ mobile cho OCR theo ocr_id
+    """
+    try:
+        conn = sqlite3.connect('logs.db')
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT image_path
+            FROM ocr_results
+            WHERE id = ?
+        """, (ocr_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row or not row[0]:
+            raise HTTPException(status_code=404, detail="Không tìm thấy ảnh cho OCR này")
+        
+        image_path = row[0]
+        
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail=f"File ảnh không tồn tại: {image_path}")
+        
+        # Xác định media type từ extension
+        extension = os.path.splitext(image_path)[1].lower()
+        media_type_map = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp'
+        }
+        media_type = media_type_map.get(extension, 'image/jpeg')
+        
+        return FileResponse(image_path, media_type=media_type)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy ảnh: {str(e)}")
+
+
+# ==================== SESSION HISTORY APIs ====================
+
+@app.post("/api/sessions/analyze")
+async def analyze_session_screenshot(file: UploadFile = File(...)):
+    """
+    Phân tích screenshot và tự động lưu dữ liệu phiên mới nhất vào database
+    Chỉ lưu các phiên chưa tồn tại (dựa trên session_id)
+    """
+    try:
+        import base64
+        import httpx
+        
+        # Đọc ảnh
+        image_data = await file.read()
+        
+        # Lưu ảnh vào thư mục để review lại sau
+        session_images_dir = "mobile_images/sessions"
+        os.makedirs(session_images_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        # Lấy extension từ filename
+        file_extension = "jpg"
+        if file.filename:
+            ext = os.path.splitext(file.filename)[1].lstrip(".")
+            if ext in ["png", "jpg", "jpeg", "webp", "gif"]:
+                file_extension = ext
+        
+        saved_filename = f"session_{timestamp}.{file_extension}"
+        saved_path = os.path.join(session_images_dir, saved_filename)
+        
+        # Lưu ảnh
+        with open(saved_path, "wb") as f:
+            f.write(image_data)
+        
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        
+        # Lấy OpenAI API key
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        
+        if not openai_api_key:
+            env_file_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+            if os.path.exists(env_file_path):
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('OPENAI_API_KEY='):
+                            openai_api_key = line.split('=', 1)[1].strip()
+                            break
+        
+        if not openai_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="OPENAI_API_KEY chưa được cấu hình. Vui lòng tạo file .env với OPENAI_API_KEY"
+            )
+        
+        # Gọi ChatGPT Vision API
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}"
+                },
+                json={
+                    "model": "gpt-4o",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": """Extract betting session data from this image.
+
+This is a betting history table. Extract ALL visible sessions with these columns:
+1. Phiên (Session ID - numbers only)
+2. Thời gian (Time - format: DD-MM-YYYY HH:MM:SS)
+3. Đặt cược (Bet: Tài or Xỉu)
+4. Kết quả (Result: Tài or Xỉu or NaN if empty)
+5. Tổng cược (Total Bet - with commas)
+6. Tiền thắng (Winnings - with + or -)
+7. Thắng/Thua (Win/Loss: "Thắng" or "Thua")
+
+Return ONLY the data rows in this exact format (use pipe | as separator):
+Phiên|Thời gian|Đặt cược|Kết quả|Tổng cược|Tiền thắng|Thắng/Thua
+524124|03-11-2025 17:41:46|Tài|Tài|2,000|+1,960|Thắng
+524768|04-11-2025 05:30:36|Xỉu|Tài|1,000|-1,000|Thua
+
+IMPORTANT:
+- Extract ALL visible sessions from the image
+- Use | to separate columns
+- Keep numbers with commas
+- For empty result, use "NaN"
+- For empty winnings, use "-"
+- Do NOT include header row
+- Do NOT include explanations
+- Do NOT include ellipsis (...)
+- Return ONLY data rows"""
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                        "detail": "high"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "max_tokens": 4096,
+                    "temperature": 0.1
+                }
+            )
+        
+        if response.status_code != 200:
+            error_detail = response.text
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Lỗi từ OpenAI API (HTTP {response.status_code}): {error_detail}"
+            )
+        
+        result = response.json()
+        extracted_text = result['choices'][0]['message']['content']
+        
+        # Parse text thành sessions
+        sessions = session_service.parse_ocr_text(extracted_text)
+        
+        if not sessions:
+            return {
+                "success": False,
+                "message": "Không tìm thấy dữ liệu phiên nào trong ảnh",
+                "ocr_text": extracted_text,
+                "sessions_found": 0,
+                "sessions_saved": 0
+            }
+        
+        # Sắp xếp theo thời gian để tìm phiên mới nhất
+        # Format thời gian: DD-MM-YYYY HH:MM:SS
+        def parse_time(time_str):
+            try:
+                return datetime.strptime(time_str, "%d-%m-%Y %H:%M:%S")
+            except:
+                return datetime.min
+        
+        sessions_sorted = sorted(sessions, key=lambda s: parse_time(s['session_time']), reverse=True)
+        
+        # Lấy phiên mới nhất
+        latest_session = sessions_sorted[0]
+        
+        # Thử lưu phiên mới nhất vào database
+        saved = session_service.add_session(latest_session, saved_path)
+        
+        return {
+            "success": True,
+            "message": f"Phân tích thành công: tìm thấy {len(sessions)} phiên",
+            "sessions_found": len(sessions),
+            "sessions_saved": 1 if saved else 0,
+            "latest_session": latest_session,
+            "duplicate": not saved,
+            "image_path": saved_path,
+            "ocr_text": extracted_text
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi: {str(e)}")
+
+
+@app.get("/api/sessions/history")
+async def get_session_history(limit: int = Query(100, description="Số lượng phiên (tối đa 100)")):
+    """
+    Lấy lịch sử các phiên gần nhất (tối đa 100 phiên)
+    """
+    try:
+        if limit > 100:
+            limit = 100
+        
+        sessions = session_service.get_recent_sessions(limit)
+        total_count = session_service.get_session_count()
+        
+        return {
+            "success": True,
+            "total_sessions": total_count,
+            "sessions": sessions
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử: {str(e)}")
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """
+    Xóa một session theo session_id
+    """
+    try:
+        deleted = session_service.delete_session(session_id)
+        
+        if deleted:
+            return {
+                "success": True,
+                "message": f"Đã xóa phiên {session_id}"
+            }
+        else:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy phiên {session_id}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi xóa phiên: {str(e)}")
+
+
+@app.delete("/api/sessions/clear-all")
+async def clear_all_sessions():
+    """
+    Xóa tất cả sessions (cẩn thận!)
+    """
+    try:
+        session_service.clear_all_sessions()
+        
+        return {
+            "success": True,
+            "message": "Đã xóa tất cả các phiên"
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi xóa dữ liệu: {str(e)}")
+
+
 # ==================== ADMIN WEB INTERFACE ====================
 
-@app.get("/admin", response_class=HTMLResponse)
+@app.get("/admin")
 async def admin_dashboard():
     """
     Giao diện admin để xem logs
     """
+    from fastapi.responses import Response
     html_content = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -1928,12 +3681,15 @@ async def admin_dashboard():
         </div>
         
         <div class="controls">
-            <div style="display: flex; gap: 10px; align-items: center;">
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                 <button class="btn btn-primary" onclick="refreshCurrentView()">🔄 Làm mới</button>
                 <button class="btn btn-success" onclick="switchView('screenshots')">🖼️ Screenshots</button>
                 <button class="btn btn-success" onclick="switchView('templates')">📄 Templates</button>
                 <button class="btn btn-info" onclick="switchView('pixel-detector')">🔍 Pixel Detector</button>
                 <button class="btn btn-warning" onclick="switchView('ocr')">📝 Đọc text</button>
+                <button class="btn btn-danger" onclick="switchView('sessions')" style="background: #dc3545;">📊 Lịch sử phiên</button>
+                <button class="btn" onclick="switchView('azure-ocr')" style="background: linear-gradient(135deg, #0078d4 0%, #00bcf2 100%); color: white; border: none;">☁️ Azure OCR</button>
+                <button class="btn" onclick="switchView('run-mobile')" style="background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%); color: white; border: none;">📱 Run Mobile</button>
             </div>
             <input type="text" class="search-box" id="search" placeholder="Tìm kiếm..." onkeyup="filterTable()">
         </div>
@@ -1944,6 +3700,11 @@ async def admin_dashboard():
                 <span style="font-weight: 600; color: #667eea;">📤 POST URL (Extension):</span>
                 <code style="background: white; padding: 8px 15px; border-radius: 6px; font-size: 13px; border: 1px solid #ddd; user-select: all;">https://lukistar.space/upload/raw</code>
                 <button class="btn btn-secondary" onclick="copyToClipboard('https://lukistar.space/upload/raw')" style="padding: 6px 12px; font-size: 12px;">📋 Copy</button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span style="font-weight: 600; color: #ff6b6b;">📱 POST URL (Mobile OCR):</span>
+                <code style="background: white; padding: 8px 15px; border-radius: 6px; font-size: 13px; border: 1px solid #ddd; user-select: all;">https://lukistar.space/upload/mobile/ocr</code>
+                <button class="btn btn-secondary" onclick="copyToClipboard('https://lukistar.space/upload/mobile/ocr')" style="padding: 6px 12px; font-size: 12px;">📋 Copy</button>
             </div>
             <div style="display: flex; align-items: center; gap: 10px;">
                 <span style="font-weight: 600; color: #28a745;">📥 GET API:</span>
@@ -2214,12 +3975,21 @@ async def admin_dashboard():
         <div class="table-container" id="ocr-view" style="display: none;">
             <h2 style="color: #667eea; margin-bottom: 25px;">📝 Đọc text từ ảnh (ChatGPT Vision)</h2>
             <p style="margin-bottom: 30px; color: #666;">
-                Sử dụng <strong>ChatGPT Vision API</strong> để đọc và trích xuất nội dung text từ ảnh.
+                Nhận ảnh tự động từ <strong>📱 Mobile App</strong> và đọc text bằng <strong>ChatGPT Vision API</strong>.
             </p>
             
-            <!-- Upload Section -->
-            <div style="background: #f8f9fa; padding: 25px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-                <h3 style="color: #28a745; margin-bottom: 20px;">📤 Upload ảnh cần đọc</h3>
+            <!-- Info Banner -->
+            <div style="background: #e7f3ff; padding: 20px; border-radius: 12px; margin-bottom: 30px; border-left: 4px solid #2196F3;">
+                <h4 style="color: #0d47a1; margin: 0 0 10px 0;">📱 Mobile tự động gửi ảnh</h4>
+                <p style="margin: 0; color: #555;">
+                    Mobile app sẽ tự động chụp và gửi screenshot lên endpoint <code style="background: white; padding: 2px 6px; border-radius: 3px;">POST /upload/mobile/ocr</code>
+                    <br>Admin chỉ cần xem kết quả trong lịch sử bên dưới.
+                </p>
+            </div>
+            
+            <!-- Upload Section - ẨN ĐI vì mobile tự gửi -->
+            <div style="display: none; background: #f8f9fa; padding: 25px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <h3 style="color: #28a745; margin-bottom: 20px;">📤 Upload ảnh cần đọc (Không cần dùng nữa)</h3>
                 
                 <form id="ocr-form" onsubmit="startOCR(event); return false;" style="display: flex; flex-direction: column; gap: 15px;">
                     <div>
@@ -2295,6 +4065,263 @@ async def admin_dashboard():
             </div>
         </div>
         
+        <!-- Sessions View -->
+        <div class="table-container" id="sessions-view" style="display: none;">
+            <h2 style="color: #667eea; margin-bottom: 25px;">📊 Lịch sử phiên cược</h2>
+            <p style="margin-bottom: 30px; color: #666;">
+                Quản lý và theo dõi các phiên cược từ screenshot. Tự động lưu phiên mới nhất, chống trùng lặp, giới hạn 100 phiên.
+            </p>
+            
+            <!-- Stats Cards -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px;">
+                <div class="stat-card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center;">
+                    <h3 id="total-sessions-count" style="font-size: 2.5em; margin-bottom: 5px;">0</h3>
+                    <p style="font-size: 0.9em; opacity: 0.9;">Tổng số phiên</p>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white; padding: 20px; border-radius: 8px; text-align: center;">
+                    <h3 id="sessions-last-update" style="font-size: 1.5em; margin-bottom: 5px;">--</h3>
+                    <p style="font-size: 0.9em; opacity: 0.9;">Cập nhật lần cuối</p>
+                </div>
+            </div>
+            
+            <!-- Actions -->
+            <div style="margin-bottom: 20px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                <button class="btn btn-primary" onclick="loadSessionHistory()">🔄 Làm mới</button>
+                <button class="btn btn-danger" onclick="clearAllSessions()" style="background: #dc3545;">🗑️ Xóa tất cả</button>
+            </div>
+            
+            <!-- Table -->
+            <div style="overflow-x: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <table id="sessions-table" style="width: 100%; border-collapse: collapse;">
+                    <thead>
+                        <tr>
+                            <th style="background: #667eea; color: white; padding: 15px; text-align: left;">Phiên</th>
+                            <th style="background: #667eea; color: white; padding: 15px; text-align: left;">Thời gian</th>
+                            <th style="background: #667eea; color: white; padding: 15px; text-align: left;">Đặt cược</th>
+                            <th style="background: #667eea; color: white; padding: 15px; text-align: left;">Tổng cược</th>
+                            <th style="background: #667eea; color: white; padding: 15px; text-align: left;">Thắng/Thua</th>
+                            <th style="background: #667eea; color: white; padding: 15px; text-align: center;">Hành động</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sessions-tbody">
+                        <tr>
+                            <td colspan="6" style="text-align: center; padding: 40px; color: #666;">
+                                Đang tải dữ liệu...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div style="margin-top: 20px; padding: 15px; background: #e7f3ff; border-radius: 8px; border-left: 4px solid #2196F3;">
+                <p style="margin: 0; color: #0d47a1; font-size: 0.9em;">
+                    <strong>💡 Lưu ý:</strong> Hệ thống tự động lưu phiên mới nhất từ screenshot, kiểm tra trùng lặp theo số phiên, và chỉ giữ 100 phiên gần nhất.
+                </p>
+            </div>
+        </div>
+        
+        <!-- Azure OCR View -->
+        <div class="table-container" id="azure-ocr-view" style="display: none;">
+            <h2 style="color: #0078d4; margin-bottom: 25px;">☁️ Azure Computer Vision OCR</h2>
+            <p style="margin-bottom: 30px; color: #666;">
+                Sử dụng <strong>Microsoft Azure Computer Vision</strong> để đọc và phân tích nội dung văn bản trong ảnh với độ chính xác cao.
+            </p>
+            
+            <!-- Info Banner -->
+            <div style="background: linear-gradient(135deg, #e7f3ff 0%, #f0f8ff 100%); padding: 20px; border-radius: 12px; margin-bottom: 30px; border-left: 4px solid #0078d4;">
+                <h4 style="color: #0078d4; margin: 0 0 10px 0;">☁️ Azure Computer Vision API</h4>
+                <p style="margin: 0; color: #555;">
+                    Dịch vụ AI cao cấp từ Microsoft Azure, hỗ trợ đọc text tiếng Việt và nhiều ngôn ngữ khác với độ chính xác cao.
+                </p>
+            </div>
+            
+            <!-- Upload Section -->
+            <div style="background: #f8f9fa; padding: 30px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <h3 style="color: #0078d4; margin-bottom: 20px;">📤 Upload ảnh để phân tích</h3>
+                
+                <form id="azure-ocr-form" onsubmit="startAzureOCR(event); return false;" style="display: flex; flex-direction: column; gap: 20px;">
+                    <div>
+                        <label style="font-weight: 600; display: block; margin-bottom: 8px; color: #333;">Chọn ảnh:</label>
+                        <input type="file" id="azure-ocr-file" accept="image/*" required 
+                               style="width: 100%; padding: 12px; border: 2px solid #0078d4; border-radius: 6px; background: white;"
+                               onchange="previewAzureImage(event)">
+                        <p style="margin-top: 5px; font-size: 0.9em; color: #666;">
+                            Hỗ trợ: JPG, PNG, BMP, GIF. Kích thước tối đa: 20MB
+                        </p>
+                    </div>
+                    
+                    <!-- Image Preview -->
+                    <div id="azure-ocr-preview" style="display: none; margin-top: 10px;">
+                        <p style="font-weight: 600; margin-bottom: 8px; color: #333;">Xem trước:</p>
+                        <img id="azure-ocr-preview-img" style="max-width: 100%; max-height: 400px; border: 2px solid #0078d4; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
+                    </div>
+                    
+                    <div style="display: flex; gap: 15px;">
+                        <button type="submit" class="btn" style="background: linear-gradient(135deg, #0078d4 0%, #00bcf2 100%); color: white; padding: 15px 30px; font-size: 16px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; flex: 1;">
+                            ☁️ Phân tích với Azure
+                        </button>
+                        <button type="button" onclick="analyzeImageWithChatGPT(event)" class="btn" style="background: linear-gradient(135deg, #10a37f 0%, #1a7f64 100%); color: white; padding: 15px 30px; font-size: 16px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; flex: 1;">
+                            🤖 Phân tích với ChatGPT
+                        </button>
+                    </div>
+                </form>
+                
+                <!-- Loading -->
+                <div id="azure-ocr-loading" style="display: none; text-align: center; margin-top: 20px;">
+                    <div style="display: inline-block; padding: 20px; background: white; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                        <div style="border: 4px solid #f3f3f3; border-top: 4px solid #0078d4; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto;"></div>
+                        <p style="margin-top: 15px; color: #0078d4; font-weight: 600;">Đang phân tích với Azure...</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Result Section -->
+            <div id="azure-ocr-result" style="display: none; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); margin-bottom: 30px;">
+                <h3 style="color: #28a745; margin-bottom: 20px; display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 1.5em;">✅</span> Kết quả phân tích
+                </h3>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                    <div style="padding: 15px; background: #f0f8ff; border-radius: 8px; border-left: 4px solid #0078d4;">
+                        <p style="margin: 0; color: #666; font-size: 0.9em;">Ngôn ngữ phát hiện:</p>
+                        <p id="azure-language" style="margin: 5px 0 0 0; font-weight: 600; font-size: 1.1em; color: #0078d4;">--</p>
+                    </div>
+                    <div style="padding: 15px; background: #f0fff4; border-radius: 8px; border-left: 4px solid #28a745;">
+                        <p style="margin: 0; color: #666; font-size: 0.9em;">Độ tin cậy:</p>
+                        <p id="azure-confidence" style="margin: 5px 0 0 0; font-weight: 600; font-size: 1.1em; color: #28a745;">--</p>
+                    </div>
+                </div>
+                
+                <!-- Bảng hiển thị kết quả (nếu là bảng cược) -->
+                <div id="azure-table-view" style="display: none; margin-bottom: 25px;">
+                    <h4 style="color: #0078d4; margin-bottom: 15px;">📊 Hiển thị dạng bảng:</h4>
+                    <div id="azure-table-container" style="overflow-x: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);"></div>
+                </div>
+                
+                <div style="margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <label style="font-weight: 600; color: #333;">Văn bản đã đọc:</label>
+                        <button class="btn btn-secondary" onclick="toggleAzureTextView()" style="padding: 5px 15px; font-size: 0.9em;" id="toggle-text-btn">
+                            👁️ Ẩn text
+                        </button>
+                    </div>
+                    <textarea id="azure-ocr-text" readonly 
+                              style="width: 100%; min-height: 200px; padding: 15px; border: 2px solid #ddd; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 14px; line-height: 1.6; resize: vertical; background: #fafafa;"></textarea>
+                </div>
+                
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="copyAzureResult()">📋 Copy văn bản</button>
+                    <button class="btn btn-success" onclick="downloadAzureResult()">💾 Tải xuống Text</button>
+                    <button class="btn btn-success" onclick="downloadAzureTableHTML()" id="download-table-btn" style="display: none;">💾 Tải xuống HTML</button>
+                    <button class="btn btn-secondary" onclick="resetAzureOCR()">🔄 Phân tích ảnh khác</button>
+                </div>
+            </div>
+            
+            <!-- ChatGPT Analysis Result -->
+            <div id="chatgpt-analysis-result" style="display: none; background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); padding: 30px; border-radius: 12px; box-shadow: 0 2px 12px rgba(16, 163, 127, 0.2); margin-bottom: 30px; border-left: 4px solid #10a37f;">
+                <h3 style="color: #10a37f; margin-bottom: 20px; display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 1.5em;">🤖</span> Nội Dung Từ ChatGPT Vision
+                </h3>
+                
+                <div id="chatgpt-analysis-content" style="background: white; padding: 20px; border-radius: 8px; white-space: pre-wrap; font-family: 'Courier New', monospace; line-height: 1.6; color: #333; font-size: 14px;"></div>
+                
+                <div style="margin-top: 20px; display: flex; gap: 10px;">
+                    <button class="btn btn-primary" onclick="copyChatGPTAnalysis()">📋 Copy nội dung</button>
+                    <button class="btn btn-success" onclick="downloadChatGPTAnalysis()">💾 Tải xuống</button>
+                </div>
+            </div>
+            
+            <!-- ChatGPT Loading -->
+            <div id="chatgpt-loading" style="display: none; text-align: center; margin-bottom: 30px;">
+                <div style="display: inline-block; padding: 20px; background: white; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <div style="border: 4px solid #f3f3f3; border-top: 4px solid #10a37f; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto;"></div>
+                    <p style="margin-top: 15px; color: #10a37f; font-weight: 600;">ChatGPT đang đọc...</p>
+                </div>
+            </div>
+            
+            <!-- Error Section -->
+            <div id="azure-ocr-error" style="display: none; background: #fff0f0; padding: 20px; border-radius: 12px; border-left: 4px solid #dc3545; margin-bottom: 30px;">
+                <h4 style="color: #dc3545; margin: 0 0 10px 0;">❌ Lỗi</h4>
+                <p id="azure-ocr-error-message" style="margin: 0; color: #333;"></p>
+            </div>
+        </div>
+        
+        <!-- Run Mobile View -->
+        <div class="table-container" id="run-mobile-view" style="display: none;">
+            <h2 style="color: #ff6b6b; margin-bottom: 25px;">📱 Run Mobile - Hệ Thống Tự Động</h2>
+            <p style="margin-bottom: 30px; color: #666;">
+                Nhận ảnh từ mobile, phân tích bằng ChatGPT, tính hệ số cược tự động theo chiến lược Martingale.
+            </p>
+            
+            <!-- Stats Cards -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px;">
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center;">
+                    <h3 id="total-devices" style="font-size: 2.5em; margin-bottom: 5px;">0</h3>
+                    <p style="font-size: 0.9em; opacity: 0.9;">Số thiết bị</p>
+                </div>
+                <div style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white; padding: 20px; border-radius: 8px; text-align: center;">
+                    <h3 id="total-analyses" style="font-size: 2.5em; margin-bottom: 5px;">0</h3>
+                    <p style="font-size: 0.9em; opacity: 0.9;">Tổng phân tích</p>
+                </div>
+            </div>
+            
+            <!-- API Info -->
+            <div style="background: #f0f8ff; padding: 20px; border-radius: 12px; margin-bottom: 30px; border-left: 4px solid #0078d4;">
+                <h4 style="color: #0078d4; margin: 0 0 15px 0;">📡 API Endpoint cho Mobile</h4>
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                    <span style="font-weight: 600;">POST:</span>
+                    <code style="background: white; padding: 8px 15px; border-radius: 6px; flex: 1;">https://lukistar.space/api/mobile/analyze</code>
+                    <button class="btn btn-secondary" onclick="copyToClipboard('https://lukistar.space/api/mobile/analyze')" style="padding: 6px 12px;">📋 Copy</button>
+                </div>
+                <div style="margin-top: 15px; font-size: 0.9em; color: #555;">
+                    <strong>Parameters:</strong>
+                    <ul style="margin: 5px 0 0 20px;">
+                        <li><code>file</code>: Screenshot image</li>
+                        <li><code>device_name</code>: Tên thiết bị (vd: "PhoneA")</li>
+                        <li><code>betting_method</code>: "Tài" hoặc "Xỉu"</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <!-- History Table -->
+            <div>
+                <div style="margin-bottom: 20px; display: flex; gap: 10px; align-items: center;">
+                    <button class="btn btn-primary" onclick="loadMobileHistory()">🔄 Làm mới</button>
+                    <select id="mobile-history-limit" onchange="loadMobileHistory()" style="padding: 8px 15px; border: 2px solid #ddd; border-radius: 6px;">
+                        <option value="10">10 records</option>
+                        <option value="50" selected>50 records</option>
+                        <option value="100">100 records</option>
+                    </select>
+                </div>
+                
+                <div style="overflow-x: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <table id="mobile-history-table" style="width: 100%; border-collapse: collapse;">
+                        <thead>
+                            <tr style="background: #ff6b6b; color: white;">
+                                <th style="padding: 15px; text-align: left;">ID</th>
+                                <th style="padding: 15px; text-align: left;">Thiết bị</th>
+                                <th style="padding: 15px; text-align: left;">Loại ảnh</th>
+                                <th style="padding: 15px; text-align: left;">Phiên</th>
+                                <th style="padding: 15px; text-align: center;">Giây</th>
+                                <th style="padding: 15px; text-align: right;">Tiền cược</th>
+                                <th style="padding: 15px; text-align: center;">Kết quả</th>
+                                <th style="padding: 15px; text-align: center;">Hệ số</th>
+                                <th style="padding: 15px; text-align: center;">Verify</th>
+                                <th style="padding: 15px; text-align: center;">Thời gian</th>
+                            </tr>
+                        </thead>
+                        <tbody id="mobile-history-tbody">
+                            <tr>
+                                <td colspan="10" style="text-align: center; padding: 40px; color: #666;">
+                                    Đang tải...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
         <div class="pagination" id="pagination"></div>
     </div>
     
@@ -2344,6 +4371,18 @@ async def admin_dashboard():
             <h2>📍 Tọa độ các nốt xanh - <span id="template-dots-name"></span></h2>
             <p style="color: #666; margin-bottom: 20px;">Tổng số nốt: <strong id="template-dots-count">0</strong></p>
             <div id="template-dots-content" style="max-height: 500px; overflow-y: auto;"></div>
+        </div>
+    </div>
+    
+    <!-- OCR TEXT MODAL -->
+    <div id="ocrTextModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeOCRTextModal()">&times;</span>
+            <h2>📄 Nội dung đầy đủ - ID #<span id="ocr-modal-id"></span></h2>
+            <div style="margin-bottom: 15px;">
+                <button class="btn btn-success" onclick="copyModalText()" style="padding: 8px 15px;">📋 Copy toàn bộ</button>
+            </div>
+            <div id="ocr-modal-content" style="max-height: 600px; overflow-y: auto; background: #f8f9fa; padding: 20px; border-radius: 8px; white-space: pre-wrap; font-family: monospace; line-height: 1.6;"></div>
         </div>
     </div>
     
@@ -2410,6 +4449,9 @@ async def admin_dashboard():
             document.getElementById('templates-view').style.display = 'none';
             document.getElementById('pixel-detector-view').style.display = 'none';
             document.getElementById('ocr-view').style.display = 'none';
+            document.getElementById('sessions-view').style.display = 'none';
+            document.getElementById('azure-ocr-view').style.display = 'none';
+            document.getElementById('run-mobile-view').style.display = 'none';
             
             if (view === 'screenshots') {
                 document.getElementById('screenshots-view').style.display = 'block';
@@ -2424,6 +4466,14 @@ async def admin_dashboard():
             } else if (view === 'ocr') {
                 document.getElementById('ocr-view').style.display = 'block';
                 loadOCRHistory();
+            } else if (view === 'sessions') {
+                document.getElementById('sessions-view').style.display = 'block';
+                loadSessionHistory();
+            } else if (view === 'azure-ocr') {
+                document.getElementById('azure-ocr-view').style.display = 'block';
+            } else if (view === 'run-mobile') {
+                document.getElementById('run-mobile-view').style.display = 'block';
+                loadMobileHistory();
             }
         }
         
@@ -3656,8 +5706,10 @@ async def admin_dashboard():
                             html += '<table style="width: 100%; border-collapse: collapse; background: white;">';
                             html += '<thead><tr style="background: #667eea; color: white;">';
                             html += '<th style="padding: 12px; text-align: left;">ID</th>';
+                            html += '<th style="padding: 12px; text-align: left;">Ảnh</th>'; // ← THÊM MỚI
                             html += '<th style="padding: 12px; text-align: left;">Thời gian</th>';
                             html += '<th style="padding: 12px; text-align: left;">Nội dung</th>';
+                            html += '<th style="padding: 12px; text-align: center;">Hành động</th>'; // ← THÊM MỚI
                             html += '</tr></thead><tbody>';
                             
                             data.history.forEach(item => {
@@ -3666,10 +5718,34 @@ async def admin_dashboard():
                                     ? item.extracted_text.substring(0, 100) + '...' 
                                     : item.extracted_text;
                                 
+                                // Image URL (nếu có)
+                                const imageUrl = item.image_path 
+                                    ? `/api/ocr/image/${item.id}` 
+                                    : null;
+                                
                                 html += '<tr style="border-bottom: 1px solid #eee;">';
                                 html += `<td style="padding: 12px;">#${item.id}</td>`;
+                                
+                                // ← CỘT ẢNH MỚI
+                                html += '<td style="padding: 12px;">';
+                                if (imageUrl) {
+                                    html += `<img src="${imageUrl}" style="width: 100px; height: 60px; object-fit: cover; border-radius: 4px; cursor: pointer; border: 2px solid #ddd;" onclick="window.open('${imageUrl}', '_blank')" title="Click để xem ảnh đầy đủ">`;
+                                } else {
+                                    html += '<span style="color: #999; font-style: italic;">Không có ảnh</span>';
+                                }
+                                html += '</td>';
+                                
                                 html += `<td style="padding: 12px;">${createdAt}</td>`;
-                                html += `<td style="padding: 12px; font-family: monospace; white-space: pre-wrap;">${textPreview}</td>`;
+                                html += `<td style="padding: 12px; font-family: monospace; white-space: pre-wrap; max-width: 400px; overflow: hidden; text-overflow: ellipsis;">${textPreview}</td>`;
+                                
+                                // ← CỘT HÀNH ĐỘNG MỚI
+                                html += '<td style="padding: 12px; text-align: center;">';
+                                if (imageUrl) {
+                                    html += `<button class="btn btn-info" onclick="window.open('${imageUrl}', '_blank')" style="padding: 5px 10px; font-size: 12px; margin-right: 5px;">👁️ Xem ảnh</button>`;
+                                }
+                                html += `<button class="btn btn-success" onclick="showOCRText(${item.id})" style="padding: 5px 10px; font-size: 12px;">📄 Text</button>`;
+                                html += '</td>';
+                                
                                 html += '</tr>';
                             });
                             
@@ -3688,6 +5764,180 @@ async def admin_dashboard():
                 }
             }
             
+            // Show OCR text in modal
+            async function showOCRText(id) {
+                try {
+                    const response = await fetch(`/api/ocr/history?limit=100`);
+                    const data = await response.json();
+                    
+                    if (response.ok && data.success) {
+                        const item = data.history.find(h => h.id === id);
+                        if (item) {
+                            document.getElementById('ocr-modal-id').textContent = id;
+                            document.getElementById('ocr-modal-content').textContent = item.extracted_text;
+                            document.getElementById('ocrTextModal').style.display = 'block';
+                        } else {
+                            alert('❌ Không tìm thấy nội dung với ID: ' + id);
+                        }
+                    } else {
+                        throw new Error(data.detail || 'Lỗi tải dữ liệu');
+                    }
+                } catch (error) {
+                    alert('❌ Lỗi: ' + error.message);
+                }
+            }
+            
+            // Close OCR text modal
+            function closeOCRTextModal() {
+                document.getElementById('ocrTextModal').style.display = 'none';
+            }
+            
+            // Copy text from modal
+            function copyModalText() {
+                const text = document.getElementById('ocr-modal-content').textContent;
+                navigator.clipboard.writeText(text).then(() => {
+                    alert('✅ Đã copy toàn bộ text vào clipboard!');
+                }).catch(err => {
+                    alert('❌ Lỗi copy: ' + err.message);
+                });
+            }
+            
+        // ==================== SESSION HISTORY FUNCTIONS ====================
+        
+        async function loadSessionHistory() {
+            const tbody = document.getElementById('sessions-tbody');
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px; color: #666;">Đang tải dữ liệu...</td></tr>';
+            
+            try {
+                const response = await fetch('/api/sessions/history?limit=100');
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    // Update stats
+                    document.getElementById('total-sessions-count').textContent = data.total_sessions;
+                    
+                    if (data.sessions.length === 0) {
+                        tbody.innerHTML = `
+                            <tr>
+                                <td colspan="6" style="text-align: center; padding: 60px;">
+                                    <div style="color: #999;">
+                                        <h3 style="margin-bottom: 10px;">📭 Chưa có dữ liệu</h3>
+                                        <p>Upload screenshot vào tab "Đọc text" để bắt đầu lưu phiên cược</p>
+                                    </div>
+                                </td>
+                            </tr>
+                        `;
+                        document.getElementById('sessions-last-update').textContent = '--';
+                    } else {
+                        // Update last update time
+                        const lastSession = data.sessions[0];
+                        const lastUpdate = new Date(lastSession.created_at);
+                        const now = new Date();
+                        const diffSeconds = Math.floor((now - lastUpdate) / 1000);
+                        
+                        let timeText = '';
+                        if (diffSeconds < 60) {
+                            timeText = 'Vừa xong';
+                        } else if (diffSeconds < 3600) {
+                            timeText = Math.floor(diffSeconds / 60) + ' phút trước';
+                        } else if (diffSeconds < 86400) {
+                            timeText = Math.floor(diffSeconds / 3600) + ' giờ trước';
+                        } else {
+                            timeText = lastUpdate.toLocaleString('vi-VN');
+                        }
+                        document.getElementById('sessions-last-update').textContent = timeText;
+                        
+                        // Render table
+                        tbody.innerHTML = '';
+                        data.sessions.forEach(session => {
+                            const winLossClass = session.win_loss === 'Thắng' ? 'win' : 'loss';
+                            const winLossColor = session.win_loss === 'Thắng' ? '#28a745' : '#dc3545';
+                            
+                            const row = document.createElement('tr');
+                            row.style.borderBottom = '1px solid #eee';
+                            row.innerHTML = `
+                                <td style="padding: 15px; font-weight: 600;">${session.session_id}</td>
+                                <td style="padding: 15px;">${session.session_time}</td>
+                                <td style="padding: 15px;">${session.bet_placed}</td>
+                                <td style="padding: 15px;">${session.total_bet}</td>
+                                <td style="padding: 15px; font-weight: 600; color: ${winLossColor};">${session.win_loss}</td>
+                                <td style="padding: 15px; text-align: center;">
+                                    <button onclick="deleteSession('${session.session_id}')" 
+                                            class="btn btn-danger" 
+                                            style="background: #dc3545; padding: 5px 12px; font-size: 0.85em;">
+                                        🗑️ Xóa
+                                    </button>
+                                </td>
+                            `;
+                            tbody.appendChild(row);
+                        });
+                    }
+                } else {
+                    throw new Error(data.detail || 'Lỗi tải dữ liệu');
+                }
+            } catch (error) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6" style="text-align: center; padding: 40px;">
+                            <div style="background: #f8d7da; color: #721c24; padding: 20px; border-radius: 8px;">
+                                <strong>❌ Lỗi:</strong> ${error.message}
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }
+        }
+        
+        async function deleteSession(sessionId) {
+            if (!confirm(`Bạn có chắc muốn xóa phiên ${sessionId}?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/sessions/${sessionId}`, {
+                    method: 'DELETE'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    alert('✅ ' + data.message);
+                    loadSessionHistory(); // Reload table
+                } else {
+                    throw new Error(data.detail || 'Lỗi xóa phiên');
+                }
+            } catch (error) {
+                alert('❌ Lỗi: ' + error.message);
+            }
+        }
+        
+        async function clearAllSessions() {
+            if (!confirm('⚠️ BẠN CÓ CHẮC MUỐN XÓA TẤT CẢ CÁC PHIÊN?\\n\\nHành động này không thể hoàn tác!')) {
+                return;
+            }
+            
+            if (!confirm('Xác nhận lần cuối: Xóa tất cả dữ liệu?')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/sessions/clear-all', {
+                    method: 'DELETE'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    alert('✅ ' + data.message);
+                    loadSessionHistory(); // Reload table
+                } else {
+                    throw new Error(data.detail || 'Lỗi xóa dữ liệu');
+                }
+            } catch (error) {
+                alert('❌ Lỗi: ' + error.message);
+            }
+        }
+        
         // ==================== EVENT HANDLERS ====================
         
         // Close modal when clicking outside
@@ -3695,14 +5945,542 @@ async def admin_dashboard():
             const modal = document.getElementById('detailModal');
             const uploadModal = document.getElementById('uploadTemplateModal');
             const dotsModal = document.getElementById('templateDotsModal');
+            const ocrModal = document.getElementById('ocrTextModal');
             if (event.target == modal) {
                 closeModal();
             } else if (event.target == uploadModal) {
                 closeUploadTemplateModal();
             } else if (event.target == dotsModal) {
                 closeTemplateDotsModal();
+            } else if (event.target == ocrModal) {
+                closeOCRTextModal();
             }
         }
+        
+        // ==================== Azure OCR Functions ====================
+        
+        function previewAzureImage(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    document.getElementById('azure-ocr-preview-img').src = e.target.result;
+                    document.getElementById('azure-ocr-preview').style.display = 'block';
+                }
+                reader.readAsDataURL(file);
+            }
+        }
+        
+        async function startAzureOCR(event) {
+            event.preventDefault();
+            
+            const fileInput = document.getElementById('azure-ocr-file');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('❌ Vui lòng chọn ảnh!');
+                return;
+            }
+            
+            // Hide previous results
+            document.getElementById('azure-ocr-result').style.display = 'none';
+            document.getElementById('azure-ocr-error').style.display = 'none';
+            
+            // Show loading
+            document.getElementById('azure-ocr-loading').style.display = 'block';
+            
+            try {
+                // Create FormData
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                // Upload to server
+                const response = await fetch('/upload/azure-ocr', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                // Hide loading
+                document.getElementById('azure-ocr-loading').style.display = 'none';
+                
+                if (response.ok && data.success) {
+                    // Show result
+                    document.getElementById('azure-language').textContent = data.language || 'Không xác định';
+                    document.getElementById('azure-confidence').textContent = data.confidence ? (data.confidence * 100).toFixed(1) + '%' : 'N/A';
+                    document.getElementById('azure-ocr-text').value = data.text || '';
+                    
+                    // Try to parse as betting table
+                    const tableHTML = parseAzureTextAsTable(data.text);
+                    if (tableHTML) {
+                        document.getElementById('azure-table-container').innerHTML = tableHTML;
+                        document.getElementById('azure-table-view').style.display = 'block';
+                        document.getElementById('download-table-btn').style.display = 'inline-block';
+                    } else {
+                        document.getElementById('azure-table-view').style.display = 'none';
+                        document.getElementById('download-table-btn').style.display = 'none';
+                    }
+                    
+                    document.getElementById('azure-ocr-result').style.display = 'block';
+                } else {
+                    throw new Error(data.detail || data.error || 'Lỗi không xác định');
+                }
+            } catch (error) {
+                // Hide loading
+                document.getElementById('azure-ocr-loading').style.display = 'none';
+                
+                // Show error
+                document.getElementById('azure-ocr-error-message').textContent = error.message;
+                document.getElementById('azure-ocr-error').style.display = 'block';
+                
+                console.error('Azure OCR Error:', error);
+            }
+        }
+        
+        function copyAzureResult() {
+            const textarea = document.getElementById('azure-ocr-text');
+            textarea.select();
+            document.execCommand('copy');
+            alert('✅ Đã copy văn bản vào clipboard!');
+        }
+        
+        function downloadAzureResult() {
+            const text = document.getElementById('azure-ocr-text').value;
+            const blob = new Blob([text], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'azure-ocr-result-' + new Date().getTime() + '.txt';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+        
+        function resetAzureOCR() {
+            document.getElementById('azure-ocr-form').reset();
+            document.getElementById('azure-ocr-preview').style.display = 'none';
+            document.getElementById('azure-ocr-result').style.display = 'none';
+            document.getElementById('azure-ocr-error').style.display = 'none';
+            document.getElementById('azure-table-view').style.display = 'none';
+        }
+        
+        function parseAzureTextAsTable(text) {
+            // Parse OCR text to detect betting history table format
+            const lines = text.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
+            
+            // Detect if this looks like a betting table
+            // Check for both keyword-based format and numeric-only format
+            const bettingKeywords = ['Đặt', 'Tài', 'Xỉu', 'Kết quả', 'Hoàn trả', 'Tổng đặt'];
+            const hasBettingKeywords = bettingKeywords.some(keyword => text.includes(keyword));
+            
+            // Also detect pure numeric format (ID, date, time, amount pattern)
+            const hasNumericPattern = /\b\d{6}\b/.test(text) && /\d{2}-\d{2}-\d{4}/.test(text) && /[+\-]\d{1,3}(?:,\d{3})*/.test(text);
+            
+            if (!hasBettingKeywords && !hasNumericPattern) {
+                return null; // Not a betting table
+            }
+            
+            // Try to extract table rows
+            const rows = [];
+            
+            // Try two parsing methods
+            
+            // Method 1: Parse line-by-line format (each field on separate line)
+            // Pattern: ID, Date, Time, Amount, Change
+            const idPattern = /^\d{6}$/;
+            const datePattern = /^\d{2}-\d{2}-\d{4}$/;
+            const timePattern = /^\d{2}:\d{2}:\d{2}$/;
+            const amountPattern = /^[\d,]+$/;
+            const changePattern = /^[+\-][\d,]+$/;
+            
+            let i = 0;
+            while (i < lines.length - 4) {
+                const line1 = lines[i];
+                const line2 = lines[i + 1];
+                const line3 = lines[i + 2];
+                const line4 = lines[i + 3];
+                const line5 = lines[i + 4];
+                
+                // Check if this is a valid row (5 consecutive lines matching pattern)
+                if (idPattern.test(line1) && datePattern.test(line2) && timePattern.test(line3) && 
+                    amountPattern.test(line4) && changePattern.test(line5)) {
+                    
+                    rows.push({
+                        id: line1,
+                        date: `${line2} ${line3}`,
+                        total: line4,
+                        change: line5,
+                        isWin: line5.startsWith('+'),
+                        description: `Phiên ${line1} - ${line2} ${line3} - Cược ${line4} - ${line5}`
+                    });
+                    
+                    i += 5; // Skip to next potential row
+                } else {
+                    i++; // Move to next line
+                }
+            }
+            
+            // Method 2: Parse traditional format with keywords (if Method 1 found nothing)
+            if (rows.length === 0) {
+                const traditionalDatePattern = /\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}/;
+                
+                for (const line of lines) {
+                    const idMatch = line.match(/\b\d{6}\b/);
+                    const dateMatch = line.match(traditionalDatePattern);
+                    
+                    if (idMatch && dateMatch) {
+                        const id = idMatch[0];
+                        const date = dateMatch[0];
+                        
+                        // Extract betting info
+                        const betMatch = line.match(/Đặt\s+(Tài|Xỉu)/);
+                        const resultMatch = line.match(/Kết quả:\s+(Tài|Xỉu)/);
+                        const totalMatch = line.match(/Tổng đặt\s+([\d,]+)/);
+                        const changeMatch = line.match(/([+\-]\d{1,3}(?:,\d{3})*)/);
+                        
+                        if (betMatch && resultMatch && totalMatch) {
+                            const bet = betMatch[1];
+                            const result = resultMatch[1];
+                            const total = totalMatch[1];
+                            const change = changeMatch ? changeMatch[1] : '0';
+                            const isWin = bet === result;
+                            
+                            rows.push({
+                                id: id,
+                                date: date,
+                                bet: bet,
+                                result: result,
+                                total: total,
+                                change: change,
+                                isWin: isWin,
+                                description: line
+                            });
+                        }
+                    }
+                }
+            }
+            
+            if (rows.length === 0) {
+                return null; // No rows found
+            }
+            
+            // Generate HTML table
+            let html = `
+                <table style="width: 100%; border-collapse: collapse; background: #2d2d2d; color: #f0f0f0; border-radius: 8px; overflow: hidden;">
+                    <thead>
+                        <tr style="background: #1a1a1a;">
+                            <th style="padding: 15px; text-align: left; border-bottom: 2px solid #444; color: #ffd700; font-weight: 600;">Phiên</th>
+                            <th style="padding: 15px; text-align: left; border-bottom: 2px solid #444; color: #f0f0f0; font-weight: 600;">Thời gian</th>
+                            <th style="padding: 15px; text-align: right; border-bottom: 2px solid #444; color: #f0f0f0; font-weight: 600;">Số tiền</th>
+                            <th style="padding: 15px; text-align: right; border-bottom: 2px solid #444; color: #f0f0f0; font-weight: 600;">Thắng/Thua</th>
+                            <th style="padding: 15px; text-align: left; border-bottom: 2px solid #444; color: #f0f0f0; font-weight: 600;">Chi tiết</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            rows.forEach((row, index) => {
+                const changeColor = row.change.startsWith('+') ? '#4caf50' : '#f44336';
+                const rowBg = index % 2 === 0 ? '#2d2d2d' : '#363636';
+                
+                html += `
+                    <tr style="background: ${rowBg}; border-bottom: 1px solid #444;">
+                        <td style="padding: 12px; color: #ffd700; font-weight: 600;">${row.id}</td>
+                        <td style="padding: 12px; color: #e0e0e0;">${row.date}</td>
+                        <td style="padding: 12px; text-align: right; color: #f0f0f0;">${row.total}</td>
+                        <td style="padding: 12px; text-align: right; color: ${changeColor}; font-weight: 700;">${row.change}</td>
+                        <td style="padding: 12px; color: #d0d0d0; font-size: 0.95em;">${row.description}</td>
+                    </tr>
+                `;
+            });
+            
+            html += `
+                    </tbody>
+                </table>
+            `;
+            
+            return html;
+        }
+        
+        function toggleAzureTextView() {
+            const textarea = document.getElementById('azure-ocr-text');
+            const button = document.getElementById('toggle-text-btn');
+            
+            if (textarea.style.display === 'none') {
+                textarea.style.display = 'block';
+                button.textContent = '👁️ Ẩn text';
+            } else {
+                textarea.style.display = 'none';
+                button.textContent = '👁️ Hiện text';
+            }
+        }
+        
+        function downloadAzureTableHTML() {
+            const tableContainer = document.getElementById('azure-table-container');
+            const tableHTML = tableContainer.innerHTML;
+            
+            const dateStr = new Date().toLocaleString('vi-VN');
+            const fullHTML = `<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bảng Kết Quả OCR - Azure Computer Vision</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            padding: 30px;
+            margin: 0;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #0078d4;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>☁️ Kết Quả Phân Tích Azure OCR</h1>
+        ${tableHTML}
+        <p style="text-align: center; color: #999; margin-top: 30px; font-size: 0.9em;">
+            Tạo bởi Azure Computer Vision | ${dateStr}
+        </p>
+    </div>
+</body>
+</html>`;
+            
+            const blob = new Blob([fullHTML], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'azure-ocr-table-' + new Date().getTime() + '.html';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+        
+        // ==================== ChatGPT Analysis Functions ====================
+        
+        async function analyzeImageWithChatGPT(event) {
+            event.preventDefault();
+            
+            const fileInput = document.getElementById('azure-ocr-file');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('❌ Vui lòng chọn ảnh trước!');
+                return;
+            }
+            
+            // Hide previous results
+            document.getElementById('azure-ocr-result').style.display = 'none';
+            document.getElementById('chatgpt-analysis-result').style.display = 'none';
+            document.getElementById('azure-ocr-error').style.display = 'none';
+            
+            // Show loading
+            document.getElementById('chatgpt-loading').style.display = 'block';
+            
+            try {
+                // Create FormData
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                // Upload to server for ChatGPT Vision analysis
+                const response = await fetch('/api/analyze-image-with-chatgpt', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                // Hide loading
+                document.getElementById('chatgpt-loading').style.display = 'none';
+                
+                if (response.ok && data.success) {
+                    // Show result
+                    document.getElementById('chatgpt-analysis-content').textContent = data.analysis;
+                    document.getElementById('chatgpt-analysis-result').style.display = 'block';
+                    
+                    // Scroll to result
+                    document.getElementById('chatgpt-analysis-result').scrollIntoView({ behavior: 'smooth' });
+                } else {
+                    throw new Error(data.detail || data.error || 'Lỗi không xác định');
+                }
+            } catch (error) {
+                // Hide loading
+                document.getElementById('chatgpt-loading').style.display = 'none';
+                
+                // Show error
+                document.getElementById('azure-ocr-error-message').textContent = 'Lỗi ChatGPT: ' + error.message;
+                document.getElementById('azure-ocr-error').style.display = 'block';
+                
+                console.error('ChatGPT Vision Error:', error);
+            }
+        }
+        
+        async function analyzeWithChatGPT() {
+            const text = document.getElementById('azure-ocr-text').value;
+            
+            if (!text || text.trim().length === 0) {
+                alert('❌ Không có văn bản để phân tích! Vui lòng chạy Azure OCR trước.');
+                return;
+            }
+            
+            // Hide previous results
+            document.getElementById('chatgpt-analysis-result').style.display = 'none';
+            document.getElementById('azure-ocr-error').style.display = 'none';
+            
+            // Show loading
+            document.getElementById('chatgpt-loading').style.display = 'block';
+            
+            try {
+                const response = await fetch('/api/analyze-with-chatgpt', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ text: text })
+                });
+                
+                const data = await response.json();
+                
+                // Hide loading
+                document.getElementById('chatgpt-loading').style.display = 'none';
+                
+                if (response.ok && data.success) {
+                    // Show result
+                    document.getElementById('chatgpt-analysis-content').textContent = data.analysis;
+                    document.getElementById('chatgpt-analysis-result').style.display = 'block';
+                    
+                    // Scroll to result
+                    document.getElementById('chatgpt-analysis-result').scrollIntoView({ behavior: 'smooth' });
+                } else {
+                    throw new Error(data.detail || data.error || 'Lỗi không xác định');
+                }
+            } catch (error) {
+                // Hide loading
+                document.getElementById('chatgpt-loading').style.display = 'none';
+                
+                // Show error
+                document.getElementById('azure-ocr-error-message').textContent = 'Lỗi ChatGPT: ' + error.message;
+                document.getElementById('azure-ocr-error').style.display = 'block';
+                
+                console.error('ChatGPT Analysis Error:', error);
+            }
+        }
+        
+        function copyChatGPTAnalysis() {
+            const content = document.getElementById('chatgpt-analysis-content').textContent;
+            navigator.clipboard.writeText(content).then(() => {
+                alert('✅ Đã copy nội dung vào clipboard!');
+            }).catch(err => {
+                console.error('Copy failed:', err);
+                alert('❌ Lỗi copy: ' + err.message);
+            });
+        }
+        
+        function downloadChatGPTAnalysis() {
+            const content = document.getElementById('chatgpt-analysis-content').textContent;
+            const blob = new Blob([content], { type: 'text/plain; charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'chatgpt-text-' + new Date().getTime() + '.txt';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+        
+        // ==================== Run Mobile Functions ====================
+        
+        async function loadMobileHistory() {
+            const tbody = document.getElementById('mobile-history-tbody');
+            const limit = document.getElementById('mobile-history-limit')?.value || 50;
+            
+            tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; padding: 40px; color: #666;">Đang tải...</td></tr>';
+            
+            try {
+                const response = await fetch(`/api/mobile/history?limit=${limit}`);
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    const history = data.history;
+                    
+                    // Update stats
+                    const uniqueDevices = [...new Set(history.map(h => h.device_name))];
+                    document.getElementById('total-devices').textContent = uniqueDevices.length;
+                    document.getElementById('total-analyses').textContent = data.total;
+                    
+                    // Render table
+                    if (history.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; padding: 40px; color: #999;">Chưa có dữ liệu</td></tr>';
+                    } else {
+                        tbody.innerHTML = '';
+                        history.forEach(record => {
+                            const row = document.createElement('tr');
+                            row.style.borderBottom = '1px solid #eee';
+                            
+                            const typeColor = record.image_type === 'HISTORY' ? '#667eea' : '#28a745';
+                            const resultColor = record.win_loss === 'Thắng' ? '#28a745' : (record.win_loss === 'Thua' ? '#dc3545' : '#999');
+                            
+                            // Verify status icon
+                            let verifyIcon = '-';
+                            if (record.verification_method) {
+                                if (record.confidence_score >= 0.85) {
+                                    verifyIcon = '✅';
+                                } else if (record.confidence_score >= 0.5) {
+                                    verifyIcon = '⚠️';
+                                } else {
+                                    verifyIcon = '❌';
+                                }
+                            }
+                            
+                            row.innerHTML = `
+                                <td style="padding: 12px;">#${record.id}</td>
+                                <td style="padding: 12px; font-weight: 600;">${record.device_name || '-'}</td>
+                                <td style="padding: 12px;">
+                                    <span style="background: ${typeColor}; color: white; padding: 4px 10px; border-radius: 4px; font-size: 0.85em;">
+                                        ${record.image_type || '-'}
+                                    </span>
+                                </td>
+                                <td style="padding: 12px;">${record.session_id || '-'}</td>
+                                <td style="padding: 12px; text-align: center;">${record.seconds_remaining || '-'}</td>
+                                <td style="padding: 12px; text-align: right; font-weight: 600;">${record.bet_amount ? record.bet_amount.toLocaleString() : '-'}</td>
+                                <td style="padding: 12px; text-align: center; color: ${resultColor}; font-weight: 600;">${record.win_loss || '-'}</td>
+                                <td style="padding: 12px; text-align: center; font-weight: 700; color: #667eea;">${record.multiplier !== null && record.multiplier !== undefined ? record.multiplier : '-'}</td>
+                                <td style="padding: 12px; text-align: center; font-size: 1.2em;">${verifyIcon}</td>
+                                <td style="padding: 12px; text-align: center; font-size: 0.9em; color: #666;">${new Date(record.created_at).toLocaleString('vi-VN')}</td>
+                            `;
+                            tbody.appendChild(row);
+                        });
+                    }
+                } else {
+                    throw new Error(data.detail || 'Lỗi tải dữ liệu');
+                }
+            } catch (error) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="10" style="text-align: center; padding: 40px;">
+                            <div style="background: #fff0f0; color: #dc3545; padding: 20px; border-radius: 8px;">
+                                <strong>❌ Lỗi:</strong> ${error.message}
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }
+        }
+        
+        // ==================== End Run Mobile Functions ====================
         
         // Load data on page load
         window.onload = function() {
@@ -3712,6 +6490,574 @@ async def admin_dashboard():
             // Load saved betting coordinates
             loadBettingCoords();
             loadBettingMethod();
+        }
+    </script>
+</body>
+</html>
+    """
+    return Response(
+        content=html_content,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
+
+
+@app.get("/sessions", response_class=HTMLResponse)
+async def session_history_page():
+    """
+    Giao diện hiển thị lịch sử các phiên cược
+    """
+    html_content = """
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lịch Sử Phiên Cược</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .upload-section {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+            border: 2px dashed #dee2e6;
+        }
+        
+        .upload-section h2 {
+            margin-bottom: 15px;
+            color: #495057;
+        }
+        
+        .file-input-wrapper {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .file-input-wrapper input[type="file"] {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+        }
+        
+        .btn-upload {
+            padding: 10px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+        
+        .btn-upload:hover {
+            transform: translateY(-2px);
+        }
+        
+        .btn-upload:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .stat-card .value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .stat-card .label {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+        
+        .table-wrapper {
+            overflow-x: auto;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+        }
+        
+        thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        th {
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+        
+        tbody tr {
+            border-bottom: 1px solid #dee2e6;
+            transition: background-color 0.2s;
+        }
+        
+        tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+        
+        td {
+            padding: 12px 15px;
+            font-size: 0.9rem;
+        }
+        
+        .win {
+            color: #28a745;
+            font-weight: 600;
+        }
+        
+        .loss {
+            color: #dc3545;
+            font-weight: 600;
+        }
+        
+        .positive {
+            color: #28a745;
+        }
+        
+        .negative {
+            color: #dc3545;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        
+        .success {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        
+        .message {
+            display: none;
+        }
+        
+        .message.show {
+            display: block;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #6c757d;
+        }
+        
+        .empty-state svg {
+            width: 100px;
+            height: 100px;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+        
+        .actions {
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .btn-refresh {
+            padding: 10px 20px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        
+        .btn-clear {
+            padding: 10px 20px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8rem;
+            }
+            
+            th, td {
+                padding: 8px;
+                font-size: 0.85rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Lịch Sử Phiên Cược</h1>
+            <p>Quản lý và theo dõi các phiên cược gần nhất</p>
+        </div>
+        
+        <div class="content">
+            <!-- Upload Section -->
+            <div class="upload-section">
+                <h2>📤 Upload Screenshot</h2>
+                <div class="file-input-wrapper">
+                    <input type="file" id="fileInput" accept="image/*">
+                    <button class="btn-upload" onclick="uploadScreenshot()">Phân tích</button>
+                </div>
+            </div>
+            
+            <!-- Messages -->
+            <div id="errorMessage" class="message error"></div>
+            <div id="successMessage" class="message success"></div>
+            
+            <!-- Stats -->
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="value" id="totalSessions">0</div>
+                    <div class="label">Tổng số phiên</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="lastUpdate">--</div>
+                    <div class="label">Cập nhật lần cuối</div>
+                </div>
+            </div>
+            
+            <!-- Actions -->
+            <div class="actions">
+                <button class="btn-refresh" onclick="loadSessions()">🔄 Làm mới</button>
+                <button class="btn-clear" onclick="confirmClearAll()">🗑️ Xóa tất cả</button>
+            </div>
+            
+            <!-- Table -->
+            <div id="tableContainer">
+                <div class="loading">Đang tải dữ liệu...</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Load sessions on page load
+        window.onload = function() {
+            loadSessions();
+        };
+        
+        // Load sessions from API
+        async function loadSessions() {
+            const container = document.getElementById('tableContainer');
+            container.innerHTML = '<div class="loading">Đang tải dữ liệu...</div>';
+            
+            try {
+                const response = await fetch('/api/sessions/history?limit=100');
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Update stats
+                    document.getElementById('totalSessions').textContent = data.total_sessions;
+                    
+                    if (data.sessions.length > 0) {
+                        // Update last update time
+                        const lastSession = data.sessions[0];
+                        document.getElementById('lastUpdate').textContent = formatTime(lastSession.created_at);
+                        
+                        // Render table
+                        renderTable(data.sessions);
+                    } else {
+                        container.innerHTML = `
+                            <div class="empty-state">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                    <line x1="9" y1="9" x2="15" y2="9"/>
+                                    <line x1="9" y1="15" x2="15" y2="15"/>
+                                </svg>
+                                <h3>Chưa có dữ liệu</h3>
+                                <p>Upload screenshot để bắt đầu phân tích phiên cược</p>
+                            </div>
+                        `;
+                        document.getElementById('lastUpdate').textContent = '--';
+                    }
+                } else {
+                    showError('Không thể tải dữ liệu');
+                }
+            } catch (error) {
+                showError('Lỗi kết nối: ' + error.message);
+            }
+        }
+        
+        // Render table
+        function renderTable(sessions) {
+            const container = document.getElementById('tableContainer');
+            
+            let html = `
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Phiên</th>
+                                <th>Thời gian</th>
+                                <th>Đặt cược</th>
+                                <th>Tổng cược</th>
+                                <th>Thắng/Thua</th>
+                                <th>Hành động</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+            `;
+            
+            sessions.forEach(session => {
+                const winLossClass = session.win_loss === 'Thắng' ? 'win' : 'loss';
+                
+                html += `
+                    <tr>
+                        <td>${session.session_id}</td>
+                        <td>${session.session_time}</td>
+                        <td>${session.bet_placed}</td>
+                        <td>${session.total_bet}</td>
+                        <td class="${winLossClass}">${session.win_loss}</td>
+                        <td>
+                            <button onclick="deleteSession('${session.session_id}')" 
+                                    style="padding: 5px 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                                Xóa
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            });
+            
+            html += `
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            
+            container.innerHTML = html;
+        }
+        
+        // Upload screenshot
+        async function uploadScreenshot() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                showError('Vui lòng chọn file ảnh');
+                return;
+            }
+            
+            const uploadBtn = document.querySelector('.btn-upload');
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = 'Đang phân tích...';
+            
+            hideMessages();
+            
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const response = await fetch('/api/sessions/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    if (data.sessions_saved > 0) {
+                        showSuccess(`Phân tích thành công! Tìm thấy ${data.sessions_found} phiên, đã lưu phiên mới nhất.`);
+                    } else {
+                        showSuccess(`Phân tích thành công! Tìm thấy ${data.sessions_found} phiên (phiên mới nhất đã tồn tại).`);
+                    }
+                    
+                    // Reload sessions
+                    setTimeout(() => {
+                        loadSessions();
+                    }, 1000);
+                } else {
+                    showError(data.message || 'Không thể phân tích ảnh');
+                }
+            } catch (error) {
+                showError('Lỗi kết nối: ' + error.message);
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Phân tích';
+                fileInput.value = '';
+            }
+        }
+        
+        // Delete session
+        async function deleteSession(sessionId) {
+            if (!confirm(`Bạn có chắc muốn xóa phiên ${sessionId}?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/sessions/${sessionId}`, {
+                    method: 'DELETE'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showSuccess(data.message);
+                    loadSessions();
+                } else {
+                    showError('Không thể xóa phiên');
+                }
+            } catch (error) {
+                showError('Lỗi kết nối: ' + error.message);
+            }
+        }
+        
+        // Confirm clear all
+        function confirmClearAll() {
+            if (confirm('⚠️ BẠN CÓ CHẮC MUỐN XÓA TẤT CẢ CÁC PHIÊN?\n\nHành động này không thể hoàn tác!')) {
+                if (confirm('Xác nhận lần cuối: Xóa tất cả dữ liệu?')) {
+                    clearAllSessions();
+                }
+            }
+        }
+        
+        // Clear all sessions
+        async function clearAllSessions() {
+            try {
+                const response = await fetch('/api/sessions/clear-all', {
+                    method: 'DELETE'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showSuccess(data.message);
+                    loadSessions();
+                } else {
+                    showError('Không thể xóa dữ liệu');
+                }
+            } catch (error) {
+                showError('Lỗi kết nối: ' + error.message);
+            }
+        }
+        
+        // Show error message
+        function showError(message) {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.textContent = message;
+            errorDiv.classList.add('show');
+            
+            setTimeout(() => {
+                errorDiv.classList.remove('show');
+            }, 5000);
+        }
+        
+        // Show success message
+        function showSuccess(message) {
+            const successDiv = document.getElementById('successMessage');
+            successDiv.textContent = message;
+            successDiv.classList.add('show');
+            
+            setTimeout(() => {
+                successDiv.classList.remove('show');
+            }, 5000);
+        }
+        
+        // Hide all messages
+        function hideMessages() {
+            document.getElementById('errorMessage').classList.remove('show');
+            document.getElementById('successMessage').classList.remove('show');
+        }
+        
+        // Format time
+        function formatTime(timestamp) {
+            const date = new Date(timestamp);
+            const now = new Date();
+            const diff = Math.floor((now - date) / 1000); // seconds
+            
+            if (diff < 60) return 'Vừa xong';
+            if (diff < 3600) return `${Math.floor(diff / 60)} phút trước`;
+            if (diff < 86400) return `${Math.floor(diff / 3600)} giờ trước`;
+            
+            return date.toLocaleString('vi-VN');
         }
     </script>
 </body>

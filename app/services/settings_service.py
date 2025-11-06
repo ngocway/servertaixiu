@@ -71,3 +71,8 @@ class SettingsService:
         return self.get_setting('betting_method')
 
 
+
+
+
+
+
