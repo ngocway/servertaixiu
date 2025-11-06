@@ -1599,6 +1599,9 @@ async def mobile_analyze(
     """
     API chính cho Mobile - Nhận ảnh và phân tích
     
+    Server xử lý request ngay khi nhận được, không quan tâm đến timing/interval.
+    Mobile app quyết định khi nào capture và gửi screenshot lên server.
+    
     Args:
         file: Screenshot từ mobile (betting history hoặc betting screen)
         device_name: Tên thiết bị (để track state riêng biệt)
