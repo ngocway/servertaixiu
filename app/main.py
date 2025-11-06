@@ -1857,10 +1857,26 @@ Trạng thái: [Active/Inactive]
             })
         
         else:
-            # Không detect được loại ảnh
+            # Không detect được loại ảnh - không phải HISTORY hay BETTING
+            # Lưu lịch sử với image_type = "UNKNOWN"
+            mobile_betting_service.save_analysis_history({
+                'device_name': device_name,
+                'betting_method': betting_method,
+                'session_id': None,
+                'image_type': 'UNKNOWN',
+                'seconds_remaining': None,
+                'bet_amount': 0,
+                'bet_status': None,
+                'win_loss': None,
+                'multiplier': None,
+                'image_path': saved_path,
+                'chatgpt_response': chatgpt_text
+            })
+            
             response_data.update({
                 "image_type": "UNKNOWN",
-                "multiplier": 0
+                "multiplier": 0,
+                "note": "Ảnh không phải là popup lịch sử cược hoặc màn hình đang cược"
             })
         
         return response_data
