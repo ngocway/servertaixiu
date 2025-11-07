@@ -1599,7 +1599,11 @@ async def mobile_analyze(
     device_name: str = Form(...),
     betting_method: str = Form(...),
     seconds_region_coords: Optional[str] = Form(None),
-    bet_amount_region_coords: Optional[str] = Form(None)
+    bet_amount_region_coords: Optional[str] = Form(None),
+    screenshot_width: Optional[int] = Form(None),
+    screenshot_height: Optional[int] = Form(None),
+    simulator_width: Optional[int] = Form(None),
+    simulator_height: Optional[int] = Form(None)
 ):
     """
     API chính cho Mobile - Nhận ảnh và phân tích
@@ -1611,6 +1615,12 @@ async def mobile_analyze(
         file: Screenshot từ mobile (betting history hoặc betting screen)
         device_name: Tên thiết bị (để track state riêng biệt)
         betting_method: "Tài" hoặc "Xỉu"
+        seconds_region_coords: Tọa độ vùng số giây (format: "x1:y1;x2:y2")
+        bet_amount_region_coords: Tọa độ vùng số tiền cược (format: "x1:y1;x2:y2" hoặc "x1:y1;x2:y2|x3:y3;x4:y4")
+        screenshot_width: Chiều rộng thực tế của screenshot (pixels) - để scale tọa độ
+        screenshot_height: Chiều cao thực tế của screenshot (pixels) - để scale tọa độ
+        simulator_width: Chiều rộng viewport của simulator (pixels) - để scale tọa độ
+        simulator_height: Chiều cao viewport của simulator (pixels) - để scale tọa độ
     
     Returns:
         JSON với thông tin phân tích và hệ số cược cho phiên tiếp theo
@@ -1622,6 +1632,24 @@ async def mobile_analyze(
         # Đọc ảnh
         image_data = await file.read()
         image = Image.open(io.BytesIO(image_data))
+        actual_image_width = image.width
+        actual_image_height = image.height
+        
+        # Tính scale factor nếu có metadata
+        scale_x = 1.0
+        scale_y = 1.0
+        needs_scaling = False
+        
+        if simulator_width and simulator_height and screenshot_width and screenshot_height:
+            # Scale từ simulator coordinates sang screenshot coordinates
+            scale_x = actual_image_width / simulator_width if simulator_width > 0 else 1.0
+            scale_y = actual_image_height / simulator_height if simulator_height > 0 else 1.0
+            needs_scaling = True
+        elif screenshot_width and screenshot_height:
+            # Nếu chỉ có screenshot dimensions, scale từ đó sang actual image
+            scale_x = actual_image_width / screenshot_width if screenshot_width > 0 else 1.0
+            scale_y = actual_image_height / screenshot_height if screenshot_height > 0 else 1.0
+            needs_scaling = True
         
         # Lưu ảnh
         mobile_dir = "mobile_images/run_mobile"
@@ -1644,8 +1672,19 @@ async def mobile_analyze(
                     return None
                 x1_str, y1_str = parts[0].split(':')
                 x2_str, y2_str = parts[1].split(':')
-                x1, y1 = int(float(x1_str)), int(float(y1_str))
-                x2, y2 = int(float(x2_str)), int(float(y2_str))
+                x1_raw, y1_raw = float(x1_str), float(y1_str)
+                x2_raw, y2_raw = float(x2_str), float(y2_str)
+                
+                # Scale tọa độ nếu cần
+                if needs_scaling:
+                    x1 = int(x1_raw * scale_x)
+                    y1 = int(y1_raw * scale_y)
+                    x2 = int(x2_raw * scale_x)
+                    y2 = int(y2_raw * scale_y)
+                else:
+                    x1, y1 = int(x1_raw), int(y1_raw)
+                    x2, y2 = int(x2_raw), int(y2_raw)
+                
                 left, right = sorted([x1, x2])
                 top, bottom = sorted([y1, y2])
                 left = max(0, min(left, image.width))
@@ -1803,6 +1842,19 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
             "regions": {
                 "seconds": seconds_region_coords,
                 "bet_amount": bet_amount_region_coords
+            },
+            "image_dimensions": {
+                "actual_width": actual_image_width,
+                "actual_height": actual_image_height,
+                "screenshot_width": screenshot_width,
+                "screenshot_height": screenshot_height,
+                "simulator_width": simulator_width,
+                "simulator_height": simulator_height
+            },
+            "scaling": {
+                "applied": needs_scaling,
+                "scale_x": scale_x,
+                "scale_y": scale_y
             }
         }
         
@@ -4644,7 +4696,16 @@ async def admin_dashboard():
                         <li><code>file</code>: Screenshot image</li>
                         <li><code>device_name</code>: Tên thiết bị (vd: "PhoneA")</li>
                         <li><code>betting_method</code>: "Tài" hoặc "Xỉu"</li>
+                        <li><code>seconds_region_coords</code>: Tọa độ vùng số giây (format: "x1:y1;x2:y2")</li>
+                        <li><code>bet_amount_region_coords</code>: Tọa độ vùng số tiền cược (format: "x1:y1;x2:y2" hoặc "x1:y1;x2:y2|x3:y3;x4:y4")</li>
+                        <li><code>screenshot_width</code>: (Optional) Chiều rộng screenshot thực tế (pixels)</li>
+                        <li><code>screenshot_height</code>: (Optional) Chiều cao screenshot thực tế (pixels)</li>
+                        <li><code>simulator_width</code>: (Optional) Chiều rộng viewport simulator (pixels)</li>
+                        <li><code>simulator_height</code>: (Optional) Chiều cao viewport simulator (pixels)</li>
                     </ul>
+                    <p style="margin-top: 10px; color: #666; font-style: italic;">
+                        💡 <strong>Lưu ý:</strong> Nếu gửi kèm <code>simulator_width/height</code> và <code>screenshot_width/height</code>, server sẽ tự động scale tọa độ cho đúng với ảnh thực tế.
+                    </p>
                 </div>
             </div>
             
