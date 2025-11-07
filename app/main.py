@@ -1837,10 +1837,10 @@ Trạng thái: [Active/Inactive/Đã cược/Chưa cược]
             
             session_id = None  # Không lấy số phiên từ màn hình cược
             seconds = int(seconds_match.group(1)) if seconds_match else 0
-            planned_bet_amount = int(planned_match.group(1).replace(',', '')) if planned_match else (
+            placed_bet_amount = int(placed_match.group(1).replace(',', '')) if placed_match else (
                 int(fallback_match.group(1).replace(',', '')) if fallback_match else 0
             )
-            placed_bet_amount = int(placed_match.group(1).replace(',', '')) if placed_match else 0
+            planned_bet_amount = int(planned_match.group(1).replace(',', '')) if planned_match else 0
             bet_status = status_match.group(1) if status_match else "Chưa cược"
             
             # Lưu lịch sử
@@ -6685,7 +6685,7 @@ async def admin_dashboard():
                 alert('❌ ' + error.message);
             }
         }
-
+        
         async function loadMobileHistory() {
             const tbody = document.getElementById('mobile-history-tbody');
             const limit = document.getElementById('mobile-history-limit')?.value || 50;
