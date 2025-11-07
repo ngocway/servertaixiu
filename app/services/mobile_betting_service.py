@@ -58,6 +58,19 @@ class MobileBettingService:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Đảm bảo các cột mới tồn tại cho database cũ
+        cursor.execute("PRAGMA table_info(mobile_analysis_history)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if 'actual_bet_amount' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN actual_bet_amount INTEGER")
+        if 'retry_count' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN retry_count INTEGER DEFAULT 0")
+        if 'verification_screenshot_path' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN verification_screenshot_path TEXT")
+        if 'error_message' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN error_message TEXT")
         
         # Table lưu chi tiết verification logs
         cursor.execute("""
