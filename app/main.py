@@ -1951,6 +1951,95 @@ async def get_mobile_history_image(record_id: int, download: bool = Query(False)
         raise HTTPException(status_code=500, detail=f"Lỗi lấy ảnh: {str(e)}")
 
 
+@app.get("/api/mobile/history/json/{record_id}")
+async def download_mobile_history_json(record_id: int):
+    """Tải JSON data của bản ghi mobile history"""
+    try:
+        conn = sqlite3.connect('logs.db')
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT * FROM mobile_analysis_history WHERE id = ?",
+            (record_id,)
+        )
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Không tìm thấy dữ liệu cho bản ghi này")
+
+        record = dict(row)
+
+        payload = {
+            "id": record.get("id"),
+            "device_name": record.get("device_name"),
+            "betting_method": record.get("betting_method"),
+            "image_type": record.get("image_type"),
+            "analysis_time": record.get("created_at"),
+            "session_id": record.get("session_id"),
+        }
+
+        if record.get("image_type") == "HISTORY":
+            payload.update({
+                "bet_amount": record.get("bet_amount"),
+                "win_loss": record.get("win_loss"),
+                "multiplier": record.get("multiplier"),
+            })
+        elif record.get("image_type") == "BETTING":
+            payload.update({
+                "seconds": record.get("seconds_remaining"),
+                "bet_amount": record.get("bet_amount"),
+                "bet_status": record.get("bet_status"),
+            })
+        else:
+            payload.update({
+                "bet_amount": record.get("bet_amount"),
+                "bet_status": record.get("bet_status"),
+                "win_loss": record.get("win_loss"),
+                "multiplier": record.get("multiplier"),
+                "seconds": record.get("seconds_remaining"),
+            })
+
+        verification_fields = {
+            "method": record.get("verification_method"),
+            "confidence": record.get("confidence_score"),
+            "status": record.get("bet_status"),
+            "verified_at": record.get("verified_at"),
+            "mismatch_detected": record.get("mismatch_detected"),
+            "actual_bet_amount": record.get("actual_bet_amount"),
+            "retry_count": record.get("retry_count"),
+            "verification_screenshot_path": record.get("verification_screenshot_path"),
+            "error_message": record.get("error_message"),
+        }
+
+        if any(value is not None for value in verification_fields.values()):
+            payload["verification"] = verification_fields
+
+        if record.get("chatgpt_response"):
+            payload["chatgpt_response"] = record.get("chatgpt_response")
+
+        if record.get("image_path"):
+            payload["image_path"] = record.get("image_path")
+
+        json_bytes = json.dumps(payload, ensure_ascii=False, indent=2)
+        filename = f"mobile-history-{record_id}.json"
+
+        return Response(
+            content=json_bytes,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi tải JSON: {str(e)}")
+
+
 @app.get("/api/mobile/device-state/{device_name}")
 async def get_device_state(device_name: str):
     """Lấy state của device cụ thể"""
@@ -4418,12 +4507,13 @@ async def admin_dashboard():
                                 <th style="padding: 15px; text-align: center;">Kết quả</th>
                                 <th style="padding: 15px; text-align: center;">Hệ số</th>
                                 <th style="padding: 15px; text-align: center;">Verify</th>
+                                <th style="padding: 15px; text-align: center;">Tải JSON</th>
                                 <th style="padding: 15px; text-align: center;">Thời gian</th>
                             </tr>
                         </thead>
                         <tbody id="mobile-history-tbody">
                             <tr>
-                                <td colspan="10" style="text-align: center; padding: 40px; color: #666;">
+                                <td colspan="11" style="text-align: center; padding: 40px; color: #666;">
                                     Đang tải...
                                 </td>
                             </tr>
@@ -6553,11 +6643,37 @@ async def admin_dashboard():
             image.src = '';
         }
 
+        async function downloadMobileJson(recordId) {
+            try {
+                const response = await fetch(`/api/mobile/history/json/${recordId}`);
+                if (!response.ok) {
+                    let errorText = 'Lỗi tải JSON';
+                    try {
+                        const errData = await response.json();
+                        errorText = errData.detail || errorText;
+                    } catch (e) {}
+                    throw new Error(errorText);
+                }
+
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `mobile-history-${recordId}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (error) {
+                alert('❌ ' + error.message);
+            }
+        }
+
         async function loadMobileHistory() {
             const tbody = document.getElementById('mobile-history-tbody');
             const limit = document.getElementById('mobile-history-limit')?.value || 50;
             
-            tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; padding: 40px; color: #666;">Đang tải...</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; padding: 40px; color: #666;">Đang tải...</td></tr>';
             
             try {
                 const response = await fetch(`/api/mobile/history?limit=${limit}`);
@@ -6573,7 +6689,7 @@ async def admin_dashboard():
                     
                     // Render table
                     if (history.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; padding: 40px; color: #999;">Chưa có dữ liệu</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; padding: 40px; color: #999;">Chưa có dữ liệu</td></tr>';
                     } else {
                         tbody.innerHTML = '';
                         history.forEach(record => {
@@ -6614,6 +6730,9 @@ async def admin_dashboard():
                                 <td style="padding: 12px; text-align: center; color: ${resultColor}; font-weight: 600;">${record.win_loss || '-'}</td>
                                 <td style="padding: 12px; text-align: center; font-weight: 700; color: #667eea;">${record.multiplier !== null && record.multiplier !== undefined ? record.multiplier : '-'}</td>
                                 <td style="padding: 12px; text-align: center; font-size: 1.2em;">${verifyIcon}</td>
+                                <td style="padding: 12px; text-align: center;">
+                                    ${hasImage ? `<button class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.85em;" onclick="downloadMobileJson(${record.id})">Tải</button>` : '-'}
+                                </td>
                                 <td style="padding: 12px; text-align: center; font-size: 0.9em; color: #666;">${new Date(record.created_at).toLocaleString('vi-VN')}</td>
                             `;
                             tbody.appendChild(row);
@@ -6625,7 +6744,7 @@ async def admin_dashboard():
             } catch (error) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="10" style="text-align: center; padding: 40px;">
+                        <td colspan="11" style="text-align: center; padding: 40px;">
                             <div style="background: #fff0f0; color: #dc3545; padding: 20px; border-radius: 8px;">
                                 <strong>❌ Lỗi:</strong> ${error.message}
                             </div>
