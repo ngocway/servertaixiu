@@ -12,6 +12,7 @@ import sqlite3
 from datetime import datetime
 import re
 import pytesseract
+from pytesseract import TesseractNotFoundError
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -1677,8 +1678,15 @@ async def mobile_analyze(
             gray = ImageOps.grayscale(region)
             gray = ImageOps.autocontrast(gray)
             gray = ImageEnhance.Contrast(gray).enhance(2.0)
-            text = pytesseract.image_to_string(gray, config='--psm 7 -c tessedit_char_whitelist=0123456789')
-            digits = re.sub(r'[^0-9]', '', text)
+            try:
+                text = pytesseract.image_to_string(gray, config='--psm 7 -c tessedit_char_whitelist=0123456789')
+            except TesseractNotFoundError:
+                # Nếu server chưa cài tesseract, trả về 0 để tránh lỗi 500
+                return 0
+            except Exception:
+                return 0
+
+            digits = re.sub(r'[^0-9]', '', text or '')
             if not digits:
                 return 0
             try:
