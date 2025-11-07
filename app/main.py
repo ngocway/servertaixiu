@@ -1659,10 +1659,17 @@ async def mobile_analyze(
 - Ví dụ: #526653 | 05-11-2025 04:48:56 | 2,000 | -2,000 | Chọn Tài
 
 **LOẠI 2 - MÀN HÌNH GAME:**
-- Có chữ TÀI và XỈU lớn
-- Có số giây đếm ngược trong vòng tròn màu vàng
-- Có các nút số: 1K, 10K, 50K...
-- Có nút hành động
+- Có chữ TÀI và XỈU lớn ở hai bên
+- Ở chính giữa có vòng tròn đếm ngược (ô xanh lá số 1)
+- Bên trái (ô xanh lá số 2) là số tiền SẼ cược: ô chữ nhật ngay phía trên dòng nút 1K/10K/100K...
+- Ngay bên dưới (ô xanh lá số 3) là số tiền ĐÃ cược: dòng nhỏ màu trắng hiển thị số tiền đã đặt. Nếu ô này trống hiểu là 0.
+- Bỏ qua mọi thông tin khác (chat, chữ, icon...)
+
+YÊU CẦU QUAN TRỌNG (dù là popup hay màn hình game):
+1. Chỉ trả về đúng cấu trúc quy định, không thêm lời giải thích.
+2. Nếu ô cần đọc không có số rõ ràng thì ghi 0.
+3. Chỉ dùng chữ số và dấu phẩy phân cách nghìn.
+4. Không suy đoán hoặc nội suy ngoài những vùng được mô tả.
 
 ---
 
@@ -1679,10 +1686,11 @@ Chi tiết: [text]
 Nếu là LOẠI 2 (MÀN HÌNH):
 ```
 TYPE: GAME
-Giây: [số trong vòng tròn]
-Tiền sẽ cược: [số màu đỏ hoặc hiển thị trong ô chọn]
-Tiền đã cược: [số màu trắng hiện tại]
-Trạng thái: [Active/Inactive/Đã cược/Chưa cược]
+SECONDS: [số ở ô xanh số 1 hoặc 0 nếu không đọc được]
+PLANNED_BET: [số ở ô xanh số 2 – tiền SẼ cược, nếu trống ghi 0]
+PLACED_BET: [số ở ô xanh số 3 – tiền ĐÃ cược, nếu trống ghi 0]
+STATUS: [Active/Inactive/Đã cược/Chưa cược]
+```
 ```"""
 
         # Call ChatGPT
@@ -1829,11 +1837,15 @@ Trạng thái: [Active/Inactive/Đã cược/Chưa cược]
             import re
             
             # LƯU Ý: KHÔNG parse số phiên từ màn hình game (không chính xác)
-            seconds_match = re.search(r'Giây:\s*(\d+)', chatgpt_text)
-            planned_match = re.search(r'Tiền sẽ cược:\s*([\d,]+)', chatgpt_text)
-            placed_match = re.search(r'Tiền đã cược:\s*([\d,]+)', chatgpt_text)
+            seconds_match = re.search(r'SECONDS:\s*(\d+)', chatgpt_text, re.IGNORECASE) or \
+                            re.search(r'Giây:\s*(\d+)', chatgpt_text)
+            planned_match = re.search(r'PLANNED_BET:\s*([\d,]+)', chatgpt_text, re.IGNORECASE) or \
+                             re.search(r'Tiền sẽ cược:\s*([\d,]+)', chatgpt_text)
+            placed_match = re.search(r'PLACED_BET:\s*([\d,]+)', chatgpt_text, re.IGNORECASE) or \
+                            re.search(r'Tiền đã cược:\s*([\d,]+)', chatgpt_text)
             fallback_match = re.search(r'(?:Tiền cược|Số lượng):\s*([\d,]+)', chatgpt_text)
-            status_match = re.search(r'Trạng thái:\s*(Active|Inactive|Đã cược|Chưa cược)', chatgpt_text)
+            status_match = re.search(r'STATUS:\s*(Active|Inactive|Đã cược|Chưa cược)', chatgpt_text, re.IGNORECASE) or \
+                           re.search(r'Trạng thái:\s*(Active|Inactive|Đã cược|Chưa cược)', chatgpt_text)
             
             session_id = None  # Không lấy số phiên từ màn hình cược
             seconds = int(seconds_match.group(1)) if seconds_match else 0
