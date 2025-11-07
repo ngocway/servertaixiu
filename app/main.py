@@ -3595,72 +3595,48 @@ async def admin_dashboard():
             padding: 30px;
         }
 
-        .mobile-id-wrapper {
-            position: relative;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            cursor: pointer;
-        }
-
-        .mobile-id-text {
+        .mobile-id-button {
+            background: none;
+            border: none;
+            color: #0d6efd;
             font-weight: 600;
-            color: inherit;
+            cursor: pointer;
+            padding: 0;
+            text-decoration: underline;
         }
 
-        .mobile-tooltip {
-            position: absolute;
-            left: 50%;
-            top: -12px;
-            transform: translate(-50%, -100%);
-            background: rgba(30, 30, 30, 0.92);
-            color: white;
-            padding: 12px;
-            border-radius: 10px;
-            width: 240px;
-            box-shadow: 0 12px 25px rgba(0, 0, 0, 0.35);
-            visibility: hidden;
-            opacity: 0;
-            transition: opacity 0.2s ease;
-            z-index: 50;
+        .mobile-id-button:focus {
+            outline: 2px solid #0d6efd;
+            outline-offset: 2px;
+        }
+
+        .mobile-image-modal-content {
+            width: 90%;
+            max-width: 520px;
+        }
+
+        .mobile-image-wrapper {
             text-align: center;
         }
 
-        .mobile-tooltip::after {
-            content: '';
-            position: absolute;
-            left: 50%;
-            bottom: -8px;
-            transform: translateX(-50%);
-            border-width: 8px;
-            border-style: solid;
-            border-color: rgba(30, 30, 30, 0.92) transparent transparent transparent;
+        .mobile-image-wrapper img {
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+            margin-bottom: 15px;
         }
 
-        .mobile-id-wrapper:hover .mobile-tooltip,
-        .mobile-id-wrapper:focus-within .mobile-tooltip {
-            visibility: visible;
-            opacity: 1;
-        }
-
-        .mobile-tooltip img {
-            width: 100%;
-            border-radius: 6px;
-            margin-bottom: 10px;
-        }
-
-        .mobile-tooltip-download {
+        .mobile-image-download {
             display: inline-block;
-            padding: 6px 14px;
+            padding: 10px 18px;
             background: #28a745;
             color: white;
             border-radius: 6px;
             text-decoration: none;
-            font-size: 0.9em;
             font-weight: 600;
         }
 
-        .mobile-tooltip-download:hover {
+        .mobile-image-download:hover {
             background: #218838;
         }
         
@@ -4496,6 +4472,20 @@ async def admin_dashboard():
             <span class="close" onclick="closeModal()">&times;</span>
             <h2>Chi tiết log #<span id="modal-log-id"></span></h2>
             <div id="modal-content"></div>
+        </div>
+    </div>
+
+    <!-- Modal xem ảnh Run Mobile -->
+    <div id="mobileImageModal" class="modal">
+        <div class="modal-content mobile-image-modal-content">
+            <span class="close" onclick="closeMobileImageModal()">&times;</span>
+            <h2 style="margin-bottom: 15px;">📷 Screenshot - ID #<span id="mobile-image-id"></span></h2>
+            <div class="mobile-image-wrapper">
+                <img id="mobile-image-preview" src="" alt="Mobile screenshot" />
+                <a id="mobile-image-download" class="mobile-image-download" href="#" download>
+                    ⬇️ Tải ảnh
+                </a>
+            </div>
         </div>
     </div>
     
@@ -6081,6 +6071,7 @@ async def admin_dashboard():
             const uploadModal = document.getElementById('uploadTemplateModal');
             const dotsModal = document.getElementById('templateDotsModal');
             const ocrModal = document.getElementById('ocrTextModal');
+            const mobileImageModal = document.getElementById('mobileImageModal');
             if (event.target == modal) {
                 closeModal();
             } else if (event.target == uploadModal) {
@@ -6089,6 +6080,8 @@ async def admin_dashboard():
                 closeTemplateDotsModal();
             } else if (event.target == ocrModal) {
                 closeOCRTextModal();
+            } else if (event.target == mobileImageModal) {
+                closeMobileImageModal();
             }
         }
         
@@ -6538,6 +6531,28 @@ async def admin_dashboard():
         
         // ==================== Run Mobile Functions ====================
         
+        function openMobileImageModal(recordId) {
+            const modal = document.getElementById('mobileImageModal');
+            const image = document.getElementById('mobile-image-preview');
+            const downloadLink = document.getElementById('mobile-image-download');
+            const idLabel = document.getElementById('mobile-image-id');
+
+            const timestamp = Date.now();
+            image.src = `/api/mobile/history/image/${recordId}?_=${timestamp}`;
+            downloadLink.href = `/api/mobile/history/image/${recordId}?download=1&_=${timestamp}`;
+            downloadLink.setAttribute('download', `mobile-history-${recordId}.jpg`);
+            idLabel.textContent = recordId;
+
+            modal.style.display = 'block';
+        }
+
+        function closeMobileImageModal() {
+            const modal = document.getElementById('mobileImageModal');
+            const image = document.getElementById('mobile-image-preview');
+            modal.style.display = 'none';
+            image.src = '';
+        }
+
         async function loadMobileHistory() {
             const tbody = document.getElementById('mobile-history-tbody');
             const limit = document.getElementById('mobile-history-limit')?.value || 50;
@@ -6582,17 +6597,7 @@ async def admin_dashboard():
                             
                             const hasImage = Boolean(record.image_path);
                             const idCellContent = hasImage
-                                ? `
-                                    <div class="mobile-id-wrapper" tabindex="0">
-                                        <span class="mobile-id-text">#${record.id}</span>
-                                        <div class="mobile-tooltip">
-                                            <img src="/api/mobile/history/image/${record.id}" alt="Screenshot #${record.id}">
-                                            <a class="mobile-tooltip-download" href="/api/mobile/history/image/${record.id}?download=1" download>
-                                                ⬇️ Tải ảnh
-                                            </a>
-                                        </div>
-                                    </div>
-                                `
+                                ? `<button class="mobile-id-button" onclick="openMobileImageModal(${record.id})">#${record.id}</button>`
                                 : `#${record.id}`;
                             
                             row.innerHTML = `
