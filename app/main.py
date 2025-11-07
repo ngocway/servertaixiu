@@ -4,12 +4,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 import io
-from PIL import Image
+from PIL import Image, ImageOps, ImageEnhance
 import numpy as np
 import os
 import json
 import sqlite3
 from datetime import datetime
+import re
+import pytesseract
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -1594,7 +1596,9 @@ Hoặc liên hệ admin để được hỗ trợ."""
 async def mobile_analyze(
     file: UploadFile = File(...),
     device_name: str = Form(...),
-    betting_method: str = Form(...)
+    betting_method: str = Form(...),
+    seconds_region_coords: Optional[str] = Form(None),
+    bet_amount_region_coords: Optional[str] = Form(None)
 ):
     """
     API chính cho Mobile - Nhận ảnh và phân tích
@@ -1630,6 +1634,58 @@ async def mobile_analyze(
         saved_path = os.path.join(mobile_dir, saved_filename)
         image.save(saved_path, quality=95)
         
+        def parse_region_coords(coord_str: Optional[str]):
+            if not coord_str or not coord_str.strip():
+                return None
+            try:
+                parts = coord_str.strip().split(';')
+                if len(parts) != 2:
+                    return None
+                x1_str, y1_str = parts[0].split(':')
+                x2_str, y2_str = parts[1].split(':')
+                x1, y1 = int(float(x1_str)), int(float(y1_str))
+                x2, y2 = int(float(x2_str)), int(float(y2_str))
+                left, right = sorted([x1, x2])
+                top, bottom = sorted([y1, y2])
+                left = max(0, min(left, image.width))
+                right = max(0, min(right, image.width))
+                top = max(0, min(top, image.height))
+                bottom = max(0, min(bottom, image.height))
+                if right - left < 2 or bottom - top < 2:
+                    return None
+                return (left, top, right, bottom)
+            except Exception:
+                return None
+
+        def parse_multiple_regions(coord_str: Optional[str]):
+            if not coord_str:
+                return []
+            regions = []
+            for chunk in coord_str.split('|'):
+                coords = parse_region_coords(chunk)
+                if coords:
+                    regions.append(coords)
+            return regions
+
+        def extract_number_from_region(base_image: Image.Image, coords: Optional[tuple]) -> int:
+            if not coords:
+                return 0
+            region = base_image.crop(coords)
+            # Upscale for better OCR
+            scale_factor = 2
+            region = region.resize((max(1, region.width * scale_factor), max(1, region.height * scale_factor)), Image.LANCZOS)
+            gray = ImageOps.grayscale(region)
+            gray = ImageOps.autocontrast(gray)
+            gray = ImageEnhance.Contrast(gray).enhance(2.0)
+            text = pytesseract.image_to_string(gray, config='--psm 7 -c tessedit_char_whitelist=0123456789')
+            digits = re.sub(r'[^0-9]', '', text)
+            if not digits:
+                return 0
+            try:
+                return int(digits)
+            except ValueError:
+                return 0
+
         # Encode ảnh
         base64_image = base64.b64encode(image_data).decode('utf-8')
         
@@ -1735,7 +1791,11 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
             "image_path": saved_path,
             "chatgpt_response": chatgpt_text,
             "planned_bet_amount": None,
-            "placed_bet_amount": None
+            "placed_bet_amount": None,
+            "regions": {
+                "seconds": seconds_region_coords,
+                "bet_amount": bet_amount_region_coords
+            }
         }
         
         # XỬ LÝ LOẠI 1: POPUP LỊCH SỬ CƯỢC
@@ -1846,13 +1906,38 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
             fallback_match = re.search(r'(?:Tiền cược|Số lượng):\s*([\d,]+)', chatgpt_text)
             status_match = re.search(r'STATUS:\s*(Active|Inactive|Đã cược|Chưa cược)', chatgpt_text, re.IGNORECASE) or \
                            re.search(r'Trạng thái:\s*(Active|Inactive|Đã cược|Chưa cược)', chatgpt_text)
-            
+
             session_id = None  # Không lấy số phiên từ màn hình cược
-            seconds = int(seconds_match.group(1)) if seconds_match else 0
-            placed_bet_amount = int(placed_match.group(1).replace(',', '')) if placed_match else (
-                int(fallback_match.group(1).replace(',', '')) if fallback_match else 0
-            )
-            planned_bet_amount = int(planned_match.group(1).replace(',', '')) if planned_match else 0
+
+            seconds_fallback = int(seconds_match.group(1)) if seconds_match else 0
+            fallback_amount = int(fallback_match.group(1).replace(',', '')) if fallback_match else 0
+            planned_fallback = int(planned_match.group(1).replace(',', '')) if planned_match else fallback_amount
+            placed_fallback = int(placed_match.group(1).replace(',', '')) if placed_match else fallback_amount
+
+            seconds_from_region = None
+            planned_from_region = None
+            placed_from_region = None
+
+            seconds_coords = parse_region_coords(seconds_region_coords)
+            if seconds_coords:
+                seconds_from_region = extract_number_from_region(image, seconds_coords)
+
+            bet_regions = parse_multiple_regions(bet_amount_region_coords)
+            if bet_regions:
+                if len(bet_regions) >= 2:
+                    planned_from_region = extract_number_from_region(image, bet_regions[0])
+                    placed_from_region = extract_number_from_region(image, bet_regions[1])
+                else:
+                    placed_from_region = extract_number_from_region(image, bet_regions[0])
+
+            seconds = seconds_from_region if seconds_from_region is not None else seconds_fallback
+            planned_bet_amount = planned_from_region if planned_from_region is not None else planned_fallback
+            placed_bet_amount = placed_from_region if placed_from_region is not None else placed_fallback
+
+            # Nếu planned và placed giống nhau do cùng 1 region -> planned = 0 khi ko có vùng riêng
+            if planned_from_region is None and bet_regions and len(bet_regions) == 1:
+                planned_bet_amount = 0
+
             bet_status = status_match.group(1) if status_match else "Chưa cược"
             
             # Lưu lịch sử
