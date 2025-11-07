@@ -229,8 +229,8 @@ class MobileBettingService:
         cursor.execute("""
             INSERT INTO mobile_analysis_history
             (device_name, betting_method, session_id, image_type, seconds_remaining,
-             bet_amount, bet_status, win_loss, multiplier, image_path, chatgpt_response)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             bet_amount, actual_bet_amount, bet_status, win_loss, multiplier, image_path, chatgpt_response)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             record.get('device_name'),
             record.get('betting_method'),
@@ -238,6 +238,7 @@ class MobileBettingService:
             record.get('image_type'),
             record.get('seconds_remaining'),
             record.get('bet_amount'),
+            record.get('actual_bet_amount'),
             record.get('bet_status'),
             record.get('win_loss'),
             record.get('multiplier'),
@@ -267,7 +268,7 @@ class MobileBettingService:
         
         cursor.execute("""
             SELECT id, device_name, betting_method, session_id, image_type,
-                   seconds_remaining, bet_amount, bet_status, win_loss, multiplier,
+                   seconds_remaining, bet_amount, actual_bet_amount, bet_status, win_loss, multiplier,
                    image_path, created_at
             FROM mobile_analysis_history
             ORDER BY created_at DESC
@@ -287,11 +288,12 @@ class MobileBettingService:
                 'image_type': row[4],
                 'seconds_remaining': row[5],
                 'bet_amount': row[6],
-                'bet_status': row[7],
-                'win_loss': row[8],
-                'multiplier': row[9],
-                'image_path': row[10],
-                'created_at': row[11]
+                'actual_bet_amount': row[7],
+                'bet_status': row[8],
+                'win_loss': row[9],
+                'multiplier': row[10],
+                'image_path': row[11],
+                'created_at': row[12]
             })
         
         return history

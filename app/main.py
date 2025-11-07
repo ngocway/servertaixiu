@@ -1680,8 +1680,9 @@ Nếu là LOẠI 2 (MÀN HÌNH):
 ```
 TYPE: GAME
 Giây: [số trong vòng tròn]
-Số lượng: [số màu trắng dưới TÀI/XỈU]
-Trạng thái: [Active/Inactive]
+Tiền sẽ cược: [số màu đỏ hoặc hiển thị trong ô chọn]
+Tiền đã cược: [số màu trắng hiện tại]
+Trạng thái: [Active/Inactive/Đã cược/Chưa cược]
 ```"""
 
         # Call ChatGPT
@@ -1724,7 +1725,9 @@ Trạng thái: [Active/Inactive]
             "device_name": device_name,
             "betting_method": betting_method,
             "image_path": saved_path,
-            "chatgpt_response": chatgpt_text
+            "chatgpt_response": chatgpt_text,
+            "planned_bet_amount": None,
+            "placed_bet_amount": None
         }
         
         # XỬ LÝ LOẠI 1: POPUP LỊCH SỬ CƯỢC
@@ -1778,6 +1781,7 @@ Trạng thái: [Active/Inactive]
                 'image_type': 'HISTORY',
                 'seconds_remaining': None,
                 'bet_amount': bet_amount,
+                'actual_bet_amount': bet_amount,
                 'bet_status': None,
                 'win_loss': win_loss,
                 'multiplier': multiplier,
@@ -1800,6 +1804,8 @@ Trạng thái: [Active/Inactive]
                 "session_id": session_id,
                 "session_time": session_time,
                 "bet_amount": bet_amount,
+                "planned_bet_amount": bet_amount,
+                "placed_bet_amount": bet_amount,
                 "win_loss": win_loss,
                 "multiplier": multiplier,
                 "verification": {
@@ -1824,12 +1830,17 @@ Trạng thái: [Active/Inactive]
             
             # LƯU Ý: KHÔNG parse số phiên từ màn hình game (không chính xác)
             seconds_match = re.search(r'Giây:\s*(\d+)', chatgpt_text)
-            bet_match = re.search(r'(?:Tiền cược|Số lượng):\s*([\d,]+)', chatgpt_text)
+            planned_match = re.search(r'Tiền sẽ cược:\s*([\d,]+)', chatgpt_text)
+            placed_match = re.search(r'Tiền đã cược:\s*([\d,]+)', chatgpt_text)
+            fallback_match = re.search(r'(?:Tiền cược|Số lượng):\s*([\d,]+)', chatgpt_text)
             status_match = re.search(r'Trạng thái:\s*(Active|Inactive|Đã cược|Chưa cược)', chatgpt_text)
             
             session_id = None  # Không lấy số phiên từ màn hình cược
             seconds = int(seconds_match.group(1)) if seconds_match else 0
-            bet_amount = int(bet_match.group(1).replace(',', '')) if bet_match else 0
+            planned_bet_amount = int(planned_match.group(1).replace(',', '')) if planned_match else (
+                int(fallback_match.group(1).replace(',', '')) if fallback_match else 0
+            )
+            placed_bet_amount = int(placed_match.group(1).replace(',', '')) if placed_match else 0
             bet_status = status_match.group(1) if status_match else "Chưa cược"
             
             # Lưu lịch sử
@@ -1839,7 +1850,8 @@ Trạng thái: [Active/Inactive]
                 'session_id': session_id,
                 'image_type': 'BETTING',
                 'seconds_remaining': seconds,
-                'bet_amount': bet_amount,
+                'bet_amount': planned_bet_amount,
+                'actual_bet_amount': placed_bet_amount,
                 'bet_status': bet_status,
                 'win_loss': None,
                 'multiplier': None,
@@ -1851,7 +1863,9 @@ Trạng thái: [Active/Inactive]
                 "image_type": "BETTING",
                 "session_id": None,  # Không có từ màn hình cược
                 "seconds": seconds,
-                "bet_amount": bet_amount,
+                "bet_amount": planned_bet_amount,
+                "planned_bet_amount": planned_bet_amount,
+                "placed_bet_amount": placed_bet_amount,
                 "bet_status": bet_status,
                 "note": "Session ID không chính xác từ màn hình cược - dùng popup để verify"
             })
@@ -1866,6 +1880,7 @@ Trạng thái: [Active/Inactive]
                 'image_type': 'UNKNOWN',
                 'seconds_remaining': None,
                 'bet_amount': 0,
+                'actual_bet_amount': None,
                 'bet_status': None,
                 'win_loss': None,
                 'multiplier': None,
@@ -1979,23 +1994,24 @@ async def download_mobile_history_json(record_id: int):
             "image_type": record.get("image_type"),
             "analysis_time": record.get("created_at"),
             "session_id": record.get("session_id"),
+            "planned_bet_amount": record.get("bet_amount"),
+            "placed_bet_amount": record.get("actual_bet_amount"),
+            "bet_amount": record.get("bet_amount"),
+            "actual_bet_amount": record.get("actual_bet_amount"),
         }
 
         if record.get("image_type") == "HISTORY":
             payload.update({
-                "bet_amount": record.get("bet_amount"),
                 "win_loss": record.get("win_loss"),
                 "multiplier": record.get("multiplier"),
             })
         elif record.get("image_type") == "BETTING":
             payload.update({
                 "seconds": record.get("seconds_remaining"),
-                "bet_amount": record.get("bet_amount"),
                 "bet_status": record.get("bet_status"),
             })
         else:
             payload.update({
-                "bet_amount": record.get("bet_amount"),
                 "bet_status": record.get("bet_status"),
                 "win_loss": record.get("win_loss"),
                 "multiplier": record.get("multiplier"),
@@ -4503,7 +4519,8 @@ async def admin_dashboard():
                                 <th style="padding: 15px; text-align: left;">Loại ảnh</th>
                                 <th style="padding: 15px; text-align: left;">Phiên</th>
                                 <th style="padding: 15px; text-align: center;">Giây</th>
-                                <th style="padding: 15px; text-align: right;">Tiền cược</th>
+                                <th style="padding: 15px; text-align: right;">Tiền sẽ cược</th>
+                                <th style="padding: 15px; text-align: right;">Tiền đã cược</th>
                                 <th style="padding: 15px; text-align: center;">Kết quả</th>
                                 <th style="padding: 15px; text-align: center;">Hệ số</th>
                                 <th style="padding: 15px; text-align: center;">Verify</th>
@@ -4513,7 +4530,7 @@ async def admin_dashboard():
                         </thead>
                         <tbody id="mobile-history-tbody">
                             <tr>
-                                <td colspan="11" style="text-align: center; padding: 40px; color: #666;">
+                                <td colspan="12" style="text-align: center; padding: 40px; color: #666;">
                                     Đang tải...
                                 </td>
                             </tr>
@@ -6673,7 +6690,7 @@ async def admin_dashboard():
             const tbody = document.getElementById('mobile-history-tbody');
             const limit = document.getElementById('mobile-history-limit')?.value || 50;
             
-                tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; padding: 40px; color: #666;">Đang tải...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="12" style="text-align: center; padding: 40px; color: #666;">Đang tải...</td></tr>';
             
             try {
                 const response = await fetch(`/api/mobile/history?limit=${limit}`);
@@ -6689,7 +6706,7 @@ async def admin_dashboard():
                     
                     // Render table
                     if (history.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; padding: 40px; color: #999;">Chưa có dữ liệu</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="12" style="text-align: center; padding: 40px; color: #999;">Chưa có dữ liệu</td></tr>';
                     } else {
                         tbody.innerHTML = '';
                         history.forEach(record => {
@@ -6715,6 +6732,15 @@ async def admin_dashboard():
                             const idCellContent = hasImage
                                 ? `<button class="mobile-id-button" onclick="openMobileImageModal(${record.id})">#${record.id}</button>`
                                 : `#${record.id}`;
+
+                            const plannedValue = record.bet_amount;
+                            const actualValue = record.actual_bet_amount;
+                            const plannedText = (plannedValue || plannedValue === 0)
+                                ? Number(plannedValue).toLocaleString('vi-VN')
+                                : '-';
+                            const actualText = (actualValue || actualValue === 0)
+                                ? Number(actualValue).toLocaleString('vi-VN')
+                                : '-';
                             
                             row.innerHTML = `
                                 <td style="padding: 12px;">${idCellContent}</td>
@@ -6726,7 +6752,8 @@ async def admin_dashboard():
                                 </td>
                                 <td style="padding: 12px;">${record.session_id || '-'}</td>
                                 <td style="padding: 12px; text-align: center;">${record.seconds_remaining || '-'}</td>
-                                <td style="padding: 12px; text-align: right; font-weight: 600;">${record.bet_amount ? record.bet_amount.toLocaleString() : '-'}</td>
+                                <td style="padding: 12px; text-align: right; font-weight: 600;">${plannedText}</td>
+                                <td style="padding: 12px; text-align: right; font-weight: 600; color: #198754;">${actualText}</td>
                                 <td style="padding: 12px; text-align: center; color: ${resultColor}; font-weight: 600;">${record.win_loss || '-'}</td>
                                 <td style="padding: 12px; text-align: center; font-weight: 700; color: #667eea;">${record.multiplier !== null && record.multiplier !== undefined ? record.multiplier : '-'}</td>
                                 <td style="padding: 12px; text-align: center; font-size: 1.2em;">${verifyIcon}</td>
@@ -6744,7 +6771,7 @@ async def admin_dashboard():
             } catch (error) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="11" style="text-align: center; padding: 40px;">
+                        <td colspan="12" style="text-align: center; padding: 40px;">
                             <div style="background: #fff0f0; color: #dc3545; padding: 20px; border-radius: 8px;">
                                 <strong>❌ Lỗi:</strong> ${error.message}
                             </div>
