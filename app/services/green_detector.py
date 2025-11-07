@@ -174,3 +174,8 @@ def extract_colors_at_positions(rgba_image: np.ndarray, dots: List[Dict]) -> Lis
 
 
 
+
+
+
+
+

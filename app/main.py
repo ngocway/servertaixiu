@@ -1904,6 +1904,53 @@ async def get_mobile_history(limit: int = 50):
         raise HTTPException(status_code=500, detail=f"Lỗi lấy lịch sử: {str(e)}")
 
 
+@app.get("/api/mobile/history/image/{record_id}")
+async def get_mobile_history_image(record_id: int, download: bool = Query(False)):
+    """Trả về ảnh screenshot tương ứng với bản ghi history"""
+    try:
+        conn = sqlite3.connect('logs.db')
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT image_path
+            FROM mobile_analysis_history
+            WHERE id = ?
+            """,
+            (record_id,)
+        )
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            raise HTTPException(status_code=404, detail="Không tìm thấy ảnh cho bản ghi này")
+
+        image_path = row[0]
+
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail=f"File ảnh không tồn tại: {image_path}")
+
+        extension = os.path.splitext(image_path)[1].lower()
+        media_type_map = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp'
+        }
+        media_type = media_type_map.get(extension, 'image/jpeg')
+
+        filename = os.path.basename(image_path) if download else None
+
+        return FileResponse(image_path, media_type=media_type, filename=filename)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy ảnh: {str(e)}")
+
+
 @app.get("/api/mobile/device-state/{device_name}")
 async def get_device_state(device_name: str):
     """Lấy state của device cụ thể"""
@@ -3546,6 +3593,75 @@ async def admin_dashboard():
         .table-container {
             overflow-x: auto;
             padding: 30px;
+        }
+
+        .mobile-id-wrapper {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+        }
+
+        .mobile-id-text {
+            font-weight: 600;
+            color: inherit;
+        }
+
+        .mobile-tooltip {
+            position: absolute;
+            left: 50%;
+            top: -12px;
+            transform: translate(-50%, -100%);
+            background: rgba(30, 30, 30, 0.92);
+            color: white;
+            padding: 12px;
+            border-radius: 10px;
+            width: 240px;
+            box-shadow: 0 12px 25px rgba(0, 0, 0, 0.35);
+            visibility: hidden;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+            z-index: 50;
+            text-align: center;
+        }
+
+        .mobile-tooltip::after {
+            content: '';
+            position: absolute;
+            left: 50%;
+            bottom: -8px;
+            transform: translateX(-50%);
+            border-width: 8px;
+            border-style: solid;
+            border-color: rgba(30, 30, 30, 0.92) transparent transparent transparent;
+        }
+
+        .mobile-id-wrapper:hover .mobile-tooltip,
+        .mobile-id-wrapper:focus-within .mobile-tooltip {
+            visibility: visible;
+            opacity: 1;
+        }
+
+        .mobile-tooltip img {
+            width: 100%;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }
+
+        .mobile-tooltip-download {
+            display: inline-block;
+            padding: 6px 14px;
+            background: #28a745;
+            color: white;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+
+        .mobile-tooltip-download:hover {
+            background: #218838;
         }
         
         table {
@@ -6464,8 +6580,23 @@ async def admin_dashboard():
                                 }
                             }
                             
+                            const hasImage = Boolean(record.image_path);
+                            const idCellContent = hasImage
+                                ? `
+                                    <div class="mobile-id-wrapper" tabindex="0">
+                                        <span class="mobile-id-text">#${record.id}</span>
+                                        <div class="mobile-tooltip">
+                                            <img src="/api/mobile/history/image/${record.id}" alt="Screenshot #${record.id}">
+                                            <a class="mobile-tooltip-download" href="/api/mobile/history/image/${record.id}?download=1" download>
+                                                ⬇️ Tải ảnh
+                                            </a>
+                                        </div>
+                                    </div>
+                                `
+                                : `#${record.id}`;
+                            
                             row.innerHTML = `
-                                <td style="padding: 12px;">#${record.id}</td>
+                                <td style="padding: 12px;">${idCellContent}</td>
                                 <td style="padding: 12px; font-weight: 600;">${record.device_name || '-'}</td>
                                 <td style="padding: 12px;">
                                     <span style="background: ${typeColor}; color: white; padding: 4px 10px; border-radius: 4px; font-size: 0.85em;">
