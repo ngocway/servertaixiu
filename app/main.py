@@ -6985,6 +6985,12 @@ async def admin_dashboard():
                                     <span style="background: ${typeColor}; color: white; padding: 4px 10px; border-radius: 4px; font-size: 0.85em;">
                                         ${record.image_type || '-'}
                                     </span>
+                                    ${record.image_type === 'BETTING' ? `
+                                        <div style="margin-top: 4px; font-size: 0.75em; color: #444; line-height: 1.4;">
+                                            <div><strong>Giây:</strong> ${record.seconds_region_coords || 'N/A'}</div>
+                                            <div><strong>Tiền cược:</strong> ${record.bet_region_coords || 'N/A'}</div>
+                                        </div>
+                                    ` : ''}
                                 </td>
                                 <td style="padding: 12px;">${record.session_id || '-'}</td>
                                 <td style="padding: 12px; text-align: center;">${record.seconds_remaining || '-'}</td>
