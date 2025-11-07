@@ -1854,7 +1854,9 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
                 'win_loss': win_loss,
                 'multiplier': multiplier,
                 'image_path': saved_path,
-                'chatgpt_response': chatgpt_text
+                'chatgpt_response': chatgpt_text,
+                'seconds_region_coords': seconds_region_coords,
+                'bet_region_coords': bet_amount_region_coords
             })
             
             # Get device state để check warnings
@@ -1953,7 +1955,9 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
                 'win_loss': None,
                 'multiplier': None,
                 'image_path': saved_path,
-                'chatgpt_response': chatgpt_text
+                'chatgpt_response': chatgpt_text,
+                'seconds_region_coords': seconds_region_coords,
+                'bet_region_coords': bet_amount_region_coords
             })
             
             response_data.update({
@@ -1982,7 +1986,9 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
                 'win_loss': None,
                 'multiplier': None,
                 'image_path': saved_path,
-                'chatgpt_response': chatgpt_text
+                'chatgpt_response': chatgpt_text,
+                'seconds_region_coords': seconds_region_coords,
+                'bet_region_coords': bet_amount_region_coords
             })
             
             response_data.update({
@@ -2095,6 +2101,11 @@ async def download_mobile_history_json(record_id: int):
             "placed_bet_amount": record.get("actual_bet_amount"),
             "bet_amount": record.get("bet_amount"),
             "actual_bet_amount": record.get("actual_bet_amount"),
+        }
+
+        payload["regions"] = {
+            "seconds": record.get("seconds_region_coords"),
+            "bet_amount": record.get("bet_region_coords")
         }
 
         if record.get("image_type") == "HISTORY":
@@ -3821,11 +3832,44 @@ async def admin_dashboard():
             text-align: center;
         }
 
+        .mobile-image-container {
+            display: inline-block;
+            position: relative;
+        }
+
         .mobile-image-wrapper img {
             max-width: 100%;
             border-radius: 8px;
             box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
             margin-bottom: 15px;
+        }
+
+        .mobile-image-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+        }
+
+        .mobile-overlay-box {
+            position: absolute;
+            border: 3px solid rgba(255, 0, 0, 0.85);
+            box-shadow: 0 0 8px rgba(0, 0, 0, 0.5);
+            border-radius: 6px;
+        }
+
+        .mobile-overlay-label {
+            position: absolute;
+            top: -22px;
+            left: -3px;
+            background: rgba(255, 0, 0, 0.9);
+            color: white;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            font-weight: 600;
         }
 
         .mobile-image-download {
@@ -4685,7 +4729,10 @@ async def admin_dashboard():
             <span class="close" onclick="closeMobileImageModal()">&times;</span>
             <h2 style="margin-bottom: 15px;">📷 Screenshot - ID #<span id="mobile-image-id"></span></h2>
             <div class="mobile-image-wrapper">
-                <img id="mobile-image-preview" src="" alt="Mobile screenshot" />
+                <div class="mobile-image-container">
+                    <img id="mobile-image-preview" src="" alt="Mobile screenshot" />
+                    <div id="mobile-image-overlay" class="mobile-image-overlay"></div>
+                </div>
                 <a id="mobile-image-download" class="mobile-image-download" href="#" download>
                     ⬇️ Tải ảnh
                 </a>
@@ -6735,11 +6782,20 @@ async def admin_dashboard():
         
         // ==================== Run Mobile Functions ====================
         
-        function openMobileImageModal(recordId) {
+        function openMobileImageModal(recordId, triggerElement) {
             const modal = document.getElementById('mobileImageModal');
             const image = document.getElementById('mobile-image-preview');
             const downloadLink = document.getElementById('mobile-image-download');
             const idLabel = document.getElementById('mobile-image-id');
+            const overlay = document.getElementById('mobile-image-overlay');
+
+            const secondsData = triggerElement ? decodeURIComponent(triggerElement.getAttribute('data-seconds') || '') : '';
+            const betData = triggerElement ? decodeURIComponent(triggerElement.getAttribute('data-bet') || '') : '';
+            const overlayPayload = {
+                seconds: secondsData,
+                bet: betData
+            };
+            overlay.setAttribute('data-overlay-info', JSON.stringify(overlayPayload));
 
             const timestamp = Date.now();
             image.src = `/api/mobile/history/image/${recordId}?_=${timestamp}`;
@@ -6747,14 +6803,93 @@ async def admin_dashboard():
             downloadLink.setAttribute('download', `mobile-history-${recordId}.jpg`);
             idLabel.textContent = recordId;
 
+            image.onload = () => {
+                renderMobileImageOverlay();
+            };
+
             modal.style.display = 'block';
         }
 
         function closeMobileImageModal() {
             const modal = document.getElementById('mobileImageModal');
             const image = document.getElementById('mobile-image-preview');
+            const overlay = document.getElementById('mobile-image-overlay');
             modal.style.display = 'none';
             image.src = '';
+            overlay.innerHTML = '';
+            overlay.removeAttribute('data-overlay-info');
+        }
+
+        function parseRegionString(coordStr) {
+            if (!coordStr) return [];
+            return coordStr.split('|').map(part => {
+                const trimmed = part.trim();
+                if (!trimmed) return null;
+                const points = trimmed.split(';');
+                if (points.length !== 2) return null;
+                const [x1, y1] = points[0].split(':').map(Number);
+                const [x2, y2] = points[1].split(':').map(Number);
+                if ([x1, y1, x2, y2].some(num => Number.isNaN(num))) return null;
+                const left = Math.min(x1, x2);
+                const right = Math.max(x1, x2);
+                const top = Math.min(y1, y2);
+                const bottom = Math.max(y1, y2);
+                if (right - left < 2 || bottom - top < 2) return null;
+                return { left, top, right, bottom };
+            }).filter(Boolean);
+        }
+
+        function renderMobileImageOverlay() {
+            const overlay = document.getElementById('mobile-image-overlay');
+            const image = document.getElementById('mobile-image-preview');
+            overlay.innerHTML = '';
+
+            const payloadRaw = overlay.getAttribute('data-overlay-info');
+            if (!payloadRaw) return;
+
+            let payload;
+            try {
+                payload = JSON.parse(payloadRaw);
+            } catch (e) {
+                return;
+            }
+
+            const secondsRegions = parseRegionString(payload.seconds || '');
+            const betRegions = parseRegionString(payload.bet || '');
+
+            const naturalWidth = image.naturalWidth || 1;
+            const naturalHeight = image.naturalHeight || 1;
+            const displayWidth = image.clientWidth || naturalWidth;
+            const displayHeight = image.clientHeight || naturalHeight;
+            const scaleX = displayWidth / naturalWidth;
+            const scaleY = displayHeight / naturalHeight;
+
+            function addBox(region, label) {
+                const box = document.createElement('div');
+                box.className = 'mobile-overlay-box';
+                box.style.left = `${region.left * scaleX}px`;
+                box.style.top = `${region.top * scaleY}px`;
+                box.style.width = `${(region.right - region.left) * scaleX}px`;
+                box.style.height = `${(region.bottom - region.top) * scaleY}px`;
+                if (label) {
+                    const badge = document.createElement('div');
+                    badge.className = 'mobile-overlay-label';
+                    badge.textContent = label;
+                    box.appendChild(badge);
+                }
+                overlay.appendChild(box);
+            }
+
+            if (secondsRegions.length > 0) {
+                addBox(secondsRegions[0], 'Giây');
+            }
+
+            if (betRegions.length > 0) {
+                addBox(betRegions[0], 'Sẽ cược');
+                if (betRegions.length > 1) {
+                    addBox(betRegions[1], 'Đã cược');
+                }
+            }
         }
 
         async function downloadMobileJson(recordId) {
@@ -6826,8 +6961,12 @@ async def admin_dashboard():
                             }
                             
                             const hasImage = Boolean(record.image_path);
+                            const secondsRegion = record.seconds_region_coords || '';
+                            const betRegion = record.bet_region_coords || '';
+                            const secondsData = encodeURIComponent(secondsRegion);
+                            const betData = encodeURIComponent(betRegion);
                             const idCellContent = hasImage
-                                ? `<button class="mobile-id-button" onclick="openMobileImageModal(${record.id})">#${record.id}</button>`
+                                ? `<button class="mobile-id-button" data-seconds="${secondsData}" data-bet="${betData}" onclick="openMobileImageModal(${record.id}, this)">#${record.id}</button>`
                                 : `#${record.id}`;
 
                             const plannedValue = record.bet_amount;

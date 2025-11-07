@@ -55,10 +55,12 @@ class MobileBettingService:
                 retry_count INTEGER DEFAULT 0,
                 verification_screenshot_path TEXT,
                 error_message TEXT,
+                seconds_region_coords TEXT,
+                bet_region_coords TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-
+        
         # Đảm bảo các cột mới tồn tại cho database cũ
         cursor.execute("PRAGMA table_info(mobile_analysis_history)")
         existing_columns = {row[1] for row in cursor.fetchall()}
@@ -71,6 +73,10 @@ class MobileBettingService:
             cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN verification_screenshot_path TEXT")
         if 'error_message' not in existing_columns:
             cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN error_message TEXT")
+        if 'seconds_region_coords' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN seconds_region_coords TEXT")
+        if 'bet_region_coords' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN bet_region_coords TEXT")
         
         # Table lưu chi tiết verification logs
         cursor.execute("""
@@ -242,8 +248,9 @@ class MobileBettingService:
         cursor.execute("""
             INSERT INTO mobile_analysis_history
             (device_name, betting_method, session_id, image_type, seconds_remaining,
-             bet_amount, actual_bet_amount, bet_status, win_loss, multiplier, image_path, chatgpt_response)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             bet_amount, actual_bet_amount, bet_status, win_loss, multiplier, image_path, chatgpt_response,
+             seconds_region_coords, bet_region_coords)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             record.get('device_name'),
             record.get('betting_method'),
@@ -256,7 +263,9 @@ class MobileBettingService:
             record.get('win_loss'),
             record.get('multiplier'),
             record.get('image_path'),
-            record.get('chatgpt_response')
+            record.get('chatgpt_response'),
+            record.get('seconds_region_coords'),
+            record.get('bet_region_coords')
         ))
         
         conn.commit()
@@ -282,7 +291,7 @@ class MobileBettingService:
         cursor.execute("""
             SELECT id, device_name, betting_method, session_id, image_type,
                    seconds_remaining, bet_amount, actual_bet_amount, bet_status, win_loss, multiplier,
-                   image_path, created_at
+                   image_path, seconds_region_coords, bet_region_coords, created_at
             FROM mobile_analysis_history
             ORDER BY created_at DESC
             LIMIT ?
@@ -306,7 +315,9 @@ class MobileBettingService:
                 'win_loss': row[9],
                 'multiplier': row[10],
                 'image_path': row[11],
-                'created_at': row[12]
+                'seconds_region_coords': row[12],
+                'bet_region_coords': row[13],
+                'created_at': row[14]
             })
         
         return history
