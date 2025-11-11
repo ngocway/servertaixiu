@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Request, Fo
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union, Any
 import io
 from PIL import Image, ImageOps, ImageEnhance
 import numpy as np
@@ -1707,6 +1707,37 @@ async def mobile_analyze(
                     regions.append(coords)
             return regions
 
+        def parse_numeric_value(value: Optional[Union[str, int, float]]) -> Optional[int]:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return int(value)
+            text = str(value).strip()
+            if not text:
+                return None
+            digits = ''.join(ch for ch in text if ch.isdigit())
+            if not digits:
+                return None
+            try:
+                return int(digits)
+            except ValueError:
+                return None
+
+        def parse_json_payload(raw_text: str) -> Dict[str, Any]:
+            if not raw_text:
+                return {}
+            cleaned = raw_text.strip()
+            start = cleaned.find('{')
+            end = cleaned.rfind('}')
+            if start != -1 and end != -1 and end >= start:
+                cleaned = cleaned[start:end + 1]
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                return {}
+            except Exception:
+                return {}
+
         def extract_number_from_region(base_image: Image.Image, coords: Optional[tuple]) -> int:
             if not coords:
                 return 0
@@ -1752,49 +1783,24 @@ async def mobile_analyze(
         
         # Prompt ChatGPT để detect loại ảnh và extract data
         # Dùng ngôn ngữ trung lập để tránh bị từ chối
-        detection_prompt = """Phân tích ảnh giao diện game và xác định loại:
+        detection_prompt = """Phân tích ảnh giao diện game và trả về đúng một JSON theo quy tắc sau:
 
-**LOẠI 1 - POPUP LỊCH SỬ:**
-- Có tiêu đề "LỊCH SỬ" ở trên cùng
-- Có bảng với nhiều dòng
-- Mỗi dòng có 5 cột: Phiên, Thời gian, Số lượng, Kết quả, Chi tiết
-- Cột kết quả có màu: xanh (+), đỏ (-), hoặc chỉ dấu gạch (-)
-- Ví dụ: #526653 | 05-11-2025 04:48:56 | 2,000 | -2,000 | Chọn Tài
+1. Nếu ảnh là popup lịch sử cược (có tiêu đề "LỊCH SỬ"):
+   - Chỉ đọc DÒNG ĐẦU TIÊN của bảng (dòng nằm trên cùng, ví dụ đã khoanh đỏ).
+   - Lấy đúng số tiền tại cột "Tổng cược" của dòng đó và giữ nguyên dấu phẩy ngăn cách nghìn → gán vào khóa "bet_amount".
+   - Đọc giá trị tại cột "Tiền thắng" (hoặc "Kết quả") của cùng dòng:
+       • Nếu số dương → "win_loss" = "Thắng".
+       • Nếu số âm hoặc 0 → "win_loss" = "Thua".
+   - Lấy số phiên ở cột "Phiên" của dòng đó làm giá trị cho khóa "id".
+   - Trả về đúng JSON: {"image_type":"HISTORY","id":"<mã phiên>","bet_amount":"<số tiền>","win_loss":"Thắng|Thua"}.
 
-**LOẠI 2 - MÀN HÌNH GAME:**
-- Có chữ TÀI và XỈU lớn ở hai bên
-- Ở chính giữa có vòng tròn đếm ngược (ô xanh lá số 1)
-- Bên trái (ô xanh lá số 2) là số tiền SẼ cược: ô chữ nhật ngay phía trên dòng nút 1K/10K/100K...
-- Ngay bên dưới (ô xanh lá số 3) là số tiền ĐÃ cược: dòng nhỏ màu trắng hiển thị số tiền đã đặt. Nếu ô này trống hiểu là 0.
-- Bỏ qua mọi thông tin khác (chat, chữ, icon...)
+2. Nếu ảnh là màn hình đang cược:
+   - Chỉ lấy SỐ GIÂY (ô đồng hồ đếm ngược ở giữa màn hình, ví dụ đã khoanh đỏ).
+   - Trả về JSON: {"image_type":"GAME","seconds":"<số giây đọc được>"}.
 
-YÊU CẦU QUAN TRỌNG (dù là popup hay màn hình game):
-1. Chỉ trả về đúng cấu trúc quy định, không thêm lời giải thích.
-2. Nếu ô cần đọc không có số rõ ràng thì ghi 0.
-3. Chỉ dùng chữ số và dấu phẩy phân cách nghìn.
-4. Không suy đoán hoặc nội suy ngoài những vùng được mô tả.
+3. Nếu không xác định được loại ảnh, trả về {"image_type":"UNKNOWN"}.
 
----
-
-Nếu là LOẠI 1 (POPUP), đọc CHỈ dòng ĐẦU TIÊN:
-```
-TYPE: HISTORY
-Phiên: #[số]
-Thời gian: [DD-MM-YYYY HH:MM:SS]
-Số lượng: [số]
-Kết quả: [+số / -số / -]
-Chi tiết: [text]
-```
-
-Nếu là LOẠI 2 (MÀN HÌNH):
-```
-TYPE: GAME
-SECONDS: [số ở ô xanh số 1 hoặc 0 nếu không đọc được]
-PLANNED_BET: [số ở ô xanh số 2 – tiền SẼ cược, nếu trống ghi 0]
-PLACED_BET: [số ở ô xanh số 3 – tiền ĐÃ cược, nếu trống ghi 0]
-STATUS: [Active/Inactive/Đã cược/Chưa cược]
-```
-```"""
+CHỈ trả về JSON thuần (không kèm giải thích, không dùng code block)."""
 
         # Call ChatGPT
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1829,14 +1835,19 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
             chatgpt_text = result['choices'][0]['message']['content']
         
         # Parse ChatGPT response để detect loại ảnh
-        is_history = "TYPE: HISTORY" in chatgpt_text
-        is_betting = "TYPE: GAME" in chatgpt_text or "TYPE: BETTING" in chatgpt_text
+        parsed_response = parse_json_payload(chatgpt_text)
+        image_type_hint = str(parsed_response.get("image_type") or "").upper()
+        if not image_type_hint:
+            if "TYPE: HISTORY" in chatgpt_text:
+                image_type_hint = "HISTORY"
+            elif "TYPE: GAME" in chatgpt_text or "TYPE: BETTING" in chatgpt_text:
+                image_type_hint = "GAME"
+        is_history = image_type_hint == "HISTORY"
+        is_betting = image_type_hint in ("GAME", "BETTING")
         
-        response_data = {
+        base_response_data = {
             "device_name": device_name,
             "betting_method": betting_method,
-            "image_path": saved_path,
-            "chatgpt_response": chatgpt_text,
             "planned_bet_amount": None,
             "placed_bet_amount": None,
             "regions": {
@@ -1857,59 +1868,78 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
                 "scale_y": scale_y
             }
         }
+        response_data = None
         
         # XỬ LÝ LOẠI 1: POPUP LỊCH SỬ CƯỢC
         if is_history:
-            # Parse thông tin dòng đầu tiên (phiên mới nhất)
             import re
-            
-            # Parse các field (dùng cả 2 format: cũ và mới)
-            session_match = re.search(r'Phiên:\s*#?(\d+)', chatgpt_text)
-            time_match = re.search(r'Thời gian:\s*(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})', chatgpt_text)
-            bet_match = re.search(r'(?:Tổng cược|Số lượng):\s*([\d,]+)', chatgpt_text)
-            win_loss_text_match = re.search(r'(?:Tiền thắng|Kết quả):\s*([+\-]?\d+|[\-])', chatgpt_text)
-            detail_match = re.search(r'Chi tiết:\s*(.+)', chatgpt_text)
-            
-            session_id = f"#{session_match.group(1)}" if session_match else None
-            session_time = time_match.group(1) if time_match else None
-            bet_amount = int(bet_match.group(1).replace(',', '')) if bet_match else 0
-            win_loss_text = win_loss_text_match.group(1) if win_loss_text_match else None
-            detail = detail_match.group(1) if detail_match else ""
-            
-            # Xác định Thắng/Thua từ Kết quả (support cả 2 format)
+
+            session_id_raw = parsed_response.get("id")
+            session_id_clean = None
+            if session_id_raw is not None:
+                session_id_clean = str(session_id_raw).strip()
+                session_id_clean = session_id_clean.lstrip("#")
+                if not session_id_clean:
+                    session_id_clean = None
+
+            if not session_id_clean:
+                session_match = re.search(r'"id"\s*:\s*"?(#?\d+)"?', chatgpt_text)
+                if session_match:
+                    session_id_clean = session_match.group(1).lstrip("#")
+
+            bet_amount_raw = parsed_response.get("bet_amount")
+            bet_amount_value = parse_numeric_value(bet_amount_raw)
+            if bet_amount_value is None:
+                bet_amount_value = 0
+            bet_amount_display = None
+            if bet_amount_raw is not None:
+                bet_amount_display = str(bet_amount_raw).strip()
+            if bet_amount_display and bet_amount_value:
+                sanitized = ''.join(ch for ch in bet_amount_display if ch.isdigit())
+                has_separator = any(ch in {',', '.'} for ch in bet_amount_display)
+                if sanitized.isdigit() and not has_separator:
+                    bet_amount_display = f"{bet_amount_value:,}".replace(",", ",")
+            if not bet_amount_display:
+                bet_amount_display = f"{bet_amount_value:,}" if bet_amount_value is not None else "0"
+
+            win_loss_value = parsed_response.get("win_loss")
             win_loss = None
-            
-            # Check Status field (format mới)
-            status_match = re.search(r'Status:\s*(Positive|Negative|Pending)', chatgpt_text)
-            if status_match:
-                status = status_match.group(1)
-                if status == 'Positive':
-                    win_loss = 'Thắng'
-                elif status == 'Negative':
-                    win_loss = 'Thua'
-                else:  # Pending
-                    win_loss = None
-            # Fallback: Parse từ số (format cũ)
-            elif win_loss_text:
-                if win_loss_text == '-':
-                    win_loss = None
-                elif win_loss_text.startswith('+'):
-                    win_loss = 'Thắng'
-                elif win_loss_text.startswith('-') and len(win_loss_text) > 1:
-                    win_loss = 'Thua'
-            
-            # Tính hệ số cược cho phiên tiếp theo
-            multiplier = mobile_betting_service.calculate_multiplier(device_name, win_loss, bet_amount)
-            
-            # Lưu lịch sử
+            if isinstance(win_loss_value, str):
+                normalized = win_loss_value.strip().lower()
+                if normalized.startswith("thă") or normalized.startswith("thang"):
+                    win_loss = "Thắng"
+                elif normalized.startswith("thua"):
+                    win_loss = "Thua"
+
+            if win_loss is None:
+                win_loss_match = re.search(r'"win_loss"\s*:\s*"([^"]+)"', chatgpt_text)
+                if win_loss_match:
+                    normalized = win_loss_match.group(1).strip().lower()
+                    if normalized.startswith("thă") or normalized.startswith("thang"):
+                        win_loss = "Thắng"
+                    elif normalized.startswith("thua"):
+                        win_loss = "Thua"
+
+            session_id_for_db = None
+            if session_id_clean:
+                session_id_for_db = session_id_clean
+                if not session_id_for_db.startswith("#"):
+                    session_id_for_db = f"#{session_id_for_db}"
+
+            multiplier = mobile_betting_service.calculate_multiplier(
+                device_name,
+                win_loss,
+                bet_amount_value or 0
+            )
+
             mobile_betting_service.save_analysis_history({
                 'device_name': device_name,
                 'betting_method': betting_method,
-                'session_id': session_id,
+                'session_id': session_id_for_db,
                 'image_type': 'HISTORY',
                 'seconds_remaining': None,
-                'bet_amount': bet_amount,
-                'actual_bet_amount': bet_amount,
+                'bet_amount': bet_amount_value,
+                'actual_bet_amount': bet_amount_value,
                 'bet_status': None,
                 'win_loss': win_loss,
                 'multiplier': multiplier,
@@ -1918,100 +1948,37 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
                 'seconds_region_coords': seconds_region_coords,
                 'bet_region_coords': bet_amount_region_coords
             })
-            
-            # Get device state để check warnings
-            device_state = mobile_betting_service.get_device_state(device_name)
-            
-            # Check if needs verification
-            needs_verification = (
-                multiplier >= 8 or  # High multiplier
-                device_state['lose_streak_count'] >= 3 or  # Long lose streak
-                device_state['rest_mode']  # In rest mode
-            )
-            
-            response_data.update({
+
+            response_data = {
+                "id": session_id_clean or "",
+                "Device name": device_name,
+                "betting_method": betting_method,
                 "image_type": "HISTORY",
-                "session_id": session_id,
-                "session_time": session_time,
-                "bet_amount": bet_amount,
-                "planned_bet_amount": bet_amount,
-                "placed_bet_amount": bet_amount,
-                "win_loss": win_loss,
-                "multiplier": multiplier,
-                "verification": {
-                    "required": needs_verification,
-                    "threshold": 0.85,
-                    "reason": "high_multiplier" if multiplier >= 8 else (
-                        "lose_streak" if device_state['lose_streak_count'] >= 3 else (
-                            "rest_mode" if device_state['rest_mode'] else None
-                        )
-                    )
-                },
-                "device_state": {
-                    "lose_streak": device_state['lose_streak_count'],
-                    "rest_mode": device_state['rest_mode'],
-                    "rest_counter": device_state['rest_counter']
-                }
-            })
+                "bet_amount": bet_amount_display,
+                "win_loss": win_loss
+            }
         
         # XỬ LÝ LOẠI 2: MÀN HÌNH GAME
         elif is_betting:
-            import re
-            
-            # LƯU Ý: KHÔNG parse số phiên từ màn hình game (không chính xác)
-            seconds_match = re.search(r'SECONDS:\s*(\d+)', chatgpt_text, re.IGNORECASE) or \
-                            re.search(r'Giây:\s*(\d+)', chatgpt_text)
-            planned_match = re.search(r'PLANNED_BET:\s*([\d,]+)', chatgpt_text, re.IGNORECASE) or \
-                             re.search(r'Tiền sẽ cược:\s*([\d,]+)', chatgpt_text)
-            placed_match = re.search(r'PLACED_BET:\s*([\d,]+)', chatgpt_text, re.IGNORECASE) or \
-                            re.search(r'Tiền đã cược:\s*([\d,]+)', chatgpt_text)
-            fallback_match = re.search(r'(?:Tiền cược|Số lượng):\s*([\d,]+)', chatgpt_text)
-            status_match = re.search(r'STATUS:\s*(Active|Inactive|Đã cược|Chưa cược)', chatgpt_text, re.IGNORECASE) or \
-                           re.search(r'Trạng thái:\s*(Active|Inactive|Đã cược|Chưa cược)', chatgpt_text)
-
-            session_id = None  # Không lấy số phiên từ màn hình cược
-
-            seconds_fallback = int(seconds_match.group(1)) if seconds_match else 0
-            fallback_amount = int(fallback_match.group(1).replace(',', '')) if fallback_match else 0
-            planned_fallback = int(planned_match.group(1).replace(',', '')) if planned_match else fallback_amount
-            placed_fallback = int(placed_match.group(1).replace(',', '')) if placed_match else fallback_amount
+            seconds_from_ai = parse_numeric_value(parsed_response.get("seconds"))
 
             seconds_from_region = None
-            planned_from_region = None
-            placed_from_region = None
 
             seconds_coords = parse_region_coords(seconds_region_coords)
             if seconds_coords:
                 seconds_from_region = extract_number_from_region(image, seconds_coords)
 
-            bet_regions = parse_multiple_regions(bet_amount_region_coords)
-            if bet_regions:
-                if len(bet_regions) >= 2:
-                    planned_from_region = extract_number_from_region(image, bet_regions[0])
-                    placed_from_region = extract_number_from_region(image, bet_regions[1])
-                else:
-                    placed_from_region = extract_number_from_region(image, bet_regions[0])
+            seconds = seconds_from_ai if seconds_from_ai is not None else (seconds_from_region if seconds_from_region is not None else 0)
 
-            seconds = seconds_from_region if seconds_from_region is not None else seconds_fallback
-            planned_bet_amount = planned_from_region if planned_from_region is not None else planned_fallback
-            placed_bet_amount = placed_from_region if placed_from_region is not None else placed_fallback
-
-            # Nếu planned và placed giống nhau do cùng 1 region -> planned = 0 khi ko có vùng riêng
-            if planned_from_region is None and bet_regions and len(bet_regions) == 1:
-                planned_bet_amount = 0
-
-            bet_status = status_match.group(1) if status_match else "Chưa cược"
-            
-            # Lưu lịch sử
             mobile_betting_service.save_analysis_history({
                 'device_name': device_name,
                 'betting_method': betting_method,
-                'session_id': session_id,
+                'session_id': None,
                 'image_type': 'BETTING',
                 'seconds_remaining': seconds,
-                'bet_amount': planned_bet_amount,
-                'actual_bet_amount': placed_bet_amount,
-                'bet_status': bet_status,
+                'bet_amount': 0,
+                'actual_bet_amount': 0,
+                'bet_status': None,
                 'win_loss': None,
                 'multiplier': None,
                 'image_path': saved_path,
@@ -2019,21 +1986,20 @@ STATUS: [Active/Inactive/Đã cược/Chưa cược]
                 'seconds_region_coords': seconds_region_coords,
                 'bet_region_coords': bet_amount_region_coords
             })
-            
-            response_data.update({
+
+            response_data = {
+                "id": "",
+                "Device name": device_name,
+                "betting_method": betting_method,
                 "image_type": "BETTING",
-                "session_id": None,  # Không có từ màn hình cược
-                "seconds": seconds,
-                "bet_amount": planned_bet_amount,
-                "planned_bet_amount": planned_bet_amount,
-                "placed_bet_amount": placed_bet_amount,
-                "bet_status": bet_status,
-                "note": "Session ID không chính xác từ màn hình cược - dùng popup để verify"
-            })
+                "seconds": seconds
+            }
         
         else:
             # Không detect được loại ảnh - không phải HISTORY hay BETTING
             # Lưu lịch sử với image_type = "UNKNOWN"
+            if response_data is None:
+                response_data = base_response_data.copy()
             mobile_betting_service.save_analysis_history({
                 'device_name': device_name,
                 'betting_method': betting_method,
@@ -2187,36 +2153,18 @@ async def download_mobile_history_json(record_id: int):
             })
 
         verification_fields = {
-            "method": record.get("verification_method"),
             "confidence": record.get("confidence_score"),
-            "status": record.get("bet_status"),
             "verified_at": record.get("verified_at"),
             "mismatch_detected": record.get("mismatch_detected"),
             "actual_bet_amount": record.get("actual_bet_amount"),
             "retry_count": record.get("retry_count"),
             "verification_screenshot_path": record.get("verification_screenshot_path"),
-            "error_message": record.get("error_message"),
         }
 
         if any(value is not None for value in verification_fields.values()):
             payload["verification"] = verification_fields
 
-        if record.get("chatgpt_response"):
-            payload["chatgpt_response"] = record.get("chatgpt_response")
-
-        if record.get("image_path"):
-            payload["image_path"] = record.get("image_path")
-
-        json_bytes = json.dumps(payload, ensure_ascii=False, indent=2)
-        filename = f"mobile-history-{record_id}.json"
-
-        return Response(
-            content=json_bytes,
-            media_type="application/json",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
-            }
-        )
+        return payload
 
     except HTTPException:
         raise
@@ -4831,6 +4779,18 @@ async def admin_dashboard():
         </div>
     </div>
     
+    <!-- JSON MODAL -->
+    <div id="jsonModal" class="modal">
+        <div class="modal-content" style="max-width: 900px;">
+            <span class="close" onclick="closeJsonModal()">&times;</span>
+            <h2>📄 JSON Data - ID #<span id="json-modal-id"></span></h2>
+            <div style="margin-bottom: 15px;">
+                <button class="btn btn-success" onclick="copyJsonToClipboard()" style="padding: 8px 15px;">📋 Copy JSON</button>
+            </div>
+            <div id="json-modal-content" style="max-height: 600px; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; padding: 20px; border-radius: 8px; white-space: pre-wrap; font-family: 'Courier New', monospace; font-size: 13px; line-height: 1.6; border: 1px solid #3e3e3e;"></div>
+        </div>
+    </div>
+    
     <script>
         let currentPage = 0;
         const limit = 50;
@@ -6392,6 +6352,7 @@ async def admin_dashboard():
             const dotsModal = document.getElementById('templateDotsModal');
             const ocrModal = document.getElementById('ocrTextModal');
             const mobileImageModal = document.getElementById('mobileImageModal');
+            const jsonModal = document.getElementById('jsonModal');
             if (event.target == modal) {
                 closeModal();
             } else if (event.target == uploadModal) {
@@ -6402,6 +6363,8 @@ async def admin_dashboard():
                 closeOCRTextModal();
             } else if (event.target == mobileImageModal) {
                 closeMobileImageModal();
+            } else if (event.target == jsonModal) {
+                closeJsonModal();
             }
         }
         
@@ -6961,7 +6924,7 @@ async def admin_dashboard():
             }
         }
 
-        async function downloadMobileJson(recordId) {
+        async function showMobileJson(recordId) {
             try {
                 const response = await fetch(`/api/mobile/history/json/${recordId}`);
                 if (!response.ok) {
@@ -6973,19 +6936,40 @@ async def admin_dashboard():
                     throw new Error(errorText);
                 }
 
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `mobile-history-${recordId}.json`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
+                const jsonData = await response.json();
+                const jsonString = JSON.stringify(jsonData, null, 2);
+                
+                // Hiển thị trong modal
+                document.getElementById('json-modal-content').textContent = jsonString;
+                document.getElementById('json-modal-id').textContent = recordId;
+                document.getElementById('jsonModal').style.display = 'block';
             } catch (error) {
                 alert('❌ ' + error.message);
             }
         }
+        
+        function closeJsonModal() {
+            document.getElementById('jsonModal').style.display = 'none';
+        }
+        
+        function copyJsonToClipboard() {
+            const jsonContent = document.getElementById('json-modal-content').textContent;
+            navigator.clipboard.writeText(jsonContent).then(() => {
+                alert('✅ Đã copy JSON vào clipboard!');
+            }).catch(err => {
+                alert('❌ Lỗi copy: ' + err.message);
+            });
+        }
+        
+        // Đóng modal khi nhấn ESC
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                const jsonModal = document.getElementById('jsonModal');
+                if (jsonModal && jsonModal.style.display === 'block') {
+                    closeJsonModal();
+                }
+            }
+        });
         
         async function loadMobileHistory() {
             const tbody = document.getElementById('mobile-history-tbody');
@@ -7069,7 +7053,7 @@ async def admin_dashboard():
                                 <td style="padding: 12px; text-align: center; font-weight: 700; color: #667eea;">${record.multiplier !== null && record.multiplier !== undefined ? record.multiplier : '-'}</td>
                                 <td style="padding: 12px; text-align: center; font-size: 1.2em;">${verifyIcon}</td>
                                 <td style="padding: 12px; text-align: center;">
-                                    ${hasImage ? `<button class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.85em;" onclick="downloadMobileJson(${record.id})">Tải</button>` : '-'}
+                                    ${hasImage ? `<button class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.85em;" onclick="showMobileJson(${record.id})">Tải</button>` : '-'}
                                 </td>
                                 <td style="padding: 12px; text-align: center; font-size: 0.9em; color: #666;">${new Date(record.created_at).toLocaleString('vi-VN')}</td>
                             `;
