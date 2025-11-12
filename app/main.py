@@ -16,6 +16,7 @@ import httpx
 from PIL import Image, ImageOps, ImageEnhance
 import pytesseract
 from pytesseract import TesseractNotFoundError
+import numpy as np
 
 from .services.mobile_betting_service import mobile_betting_service
 
@@ -44,9 +45,11 @@ def normalize_choice(value: Optional[str]) -> Optional[str]:
 
 def win_label_from_token(token: Optional[str]) -> Optional[str]:
     if token == "win":
-        return "Thắng"
+        return "Win"
     if token == "loss":
-        return "Thua"
+        return "Loss"
+    if token == "unknown":
+        return "Unknown"
     return None
 
 
@@ -56,10 +59,12 @@ def win_token_from_label(label: Optional[str]) -> Optional[str]:
     text = unicodedata.normalize("NFD", str(label))
     text = ''.join(ch for ch in text if unicodedata.category(ch) != 'Mn')
     text = text.lower().strip()
-    if text.startswith("thang"):
+    if text.startswith("thang") or text.startswith("win"):
         return "win"
-    if text.startswith("thua"):
+    if text.startswith("thua") or text.startswith("loss"):
         return "loss"
+    if text.startswith("unknown") or text.startswith("chua xac dinh"):
+        return "unknown"
     return None
 
 
@@ -181,6 +186,16 @@ def _build_dashboard_html() -> str:
             </div>
             <p class=\"muted\">Gá»­i form-data gá»“m <code>file</code>, <code>device_name</code>, <code>betting_method</code> vÃ  cÃ¡c tá»a Ä‘á»™ tÃ¹y chá»n.</p>
         </div>
+        <div class=\"card\" style=\"border-left: 5px solid #10b981;\">
+            <h3 style=\"margin-top: 0;\">📸 BETTING Sample Image</h3>
+            <p class=\"muted\">Upload a sample BETTING image with the seconds timer marked (red box). This image will be used to help ChatGPT identify the correct seconds location.</p>
+            <div style=\"display: flex; gap: 16px; align-items: center; flex-wrap: wrap;\">
+                <input type=\"file\" id=\"betting-sample-input\" accept=\"image/*\" style=\"display: none;\" onchange=\"uploadBettingSample()\">
+                <button class=\"primary\" onclick=\"document.getElementById('betting-sample-input').click()\">📤 Upload/Replace Sample</button>
+                <div id=\"betting-sample-status\" style=\"flex: 1; min-width: 200px;\"></div>
+            </div>
+            <div id=\"betting-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
+        </div>
         <div class=\"card\">
             <div class=\"stats\">
                 <div class=\"stat\">
@@ -264,8 +279,54 @@ def _build_dashboard_html() -> str:
     </div>
 
     <script>
+        async function uploadBettingSample() {
+            const input = document.getElementById('betting-sample-input');
+            const file = input.files[0];
+            if (!file) return;
+
+            const statusDiv = document.getElementById('betting-sample-status');
+            statusDiv.innerHTML = '<span style="color: #64748b;">Uploading...</span>';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const resp = await fetch('/api/mobile/betting-sample/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await resp.json();
+                
+                if (resp.ok && data.success) {
+                    statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 600;">✓ Uploaded successfully!</span>';
+                    loadBettingSamplePreview();
+                } else {
+                    statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${data.detail || 'Upload failed'}</span>`;
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${error.message}</span>`;
+            }
+        }
+
+        async function loadBettingSamplePreview() {
+            const previewDiv = document.getElementById('betting-sample-preview');
+            try {
+                const resp = await fetch('/api/mobile/betting-sample');
+                if (resp.ok) {
+                    const blob = await resp.blob();
+                    const url = URL.createObjectURL(blob);
+                    previewDiv.innerHTML = `<img src="${url}" alt="Betting Sample" style="max-width: 100%; max-height: 400px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />`;
+                } else {
+                    previewDiv.innerHTML = '<p class="muted">No sample image uploaded yet.</p>';
+                }
+            } catch (error) {
+                previewDiv.innerHTML = '<p class="muted">No sample image uploaded yet.</p>';
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
             loadHistory();
+            loadBettingSamplePreview();
         });
 
         async function copyEndpoint() {
@@ -320,8 +381,11 @@ def _build_dashboard_html() -> str:
                         <td class="center">${winLoss}</td>
                         <td class="center">${multiplier}</td>
                         <td class="actions">
-                            ${record.image_path ? `<button class="secondary small" data-id="${record.id}" data-seconds="${record.seconds_region_coords || ''}" data-bet="${record.bet_region_coords || ''}" onclick="openImageModal(this)">ðŸ–¼ï¸ áº¢nh</button>` : ''}
+                            ${record.image_path ? `<button class="secondary small" data-id="${record.id}" data-seconds="${record.seconds_region_coords || ''}" data-bet="${record.bet_region_coords || ''}" onclick="openImageModal(this)">🖼️ Image</button>` : ''}
+                            ${record.image_type === 'HISTORY' && record.image_path ? `<button class="secondary small" data-id="${record.id}" onclick="openCroppedImageModal(this)">✂️ View Cropped</button>` : ''}
+                            ${record.image_type === 'BETTING' && record.image_path ? `<button class="secondary small" data-id="${record.id}" onclick="openBettingCroppedImageModal(this)">✂️ View Cropped</button>` : ''}
                             <button class="primary small" onclick="openJsonModal(${record.id})">JSON</button>
+                            <button class="secondary small" onclick="downloadJson(${record.id})">💾 Download JSON</button>
                         </td>
                         <td>${createdAt}</td>
                     `;
@@ -359,6 +423,50 @@ def _build_dashboard_html() -> str:
             overlay.dataset.bet = bet;
 
             image.onload = () => renderOverlay();
+            document.getElementById('image-modal').style.display = 'flex';
+        }
+
+        function openCroppedImageModal(button) {
+            const recordId = button.dataset.id;
+            const timestamp = Date.now();
+
+            const image = document.getElementById('modal-image');
+            const overlay = document.getElementById('modal-overlay');
+            const download = document.getElementById('download-link');
+
+            image.src = `/api/mobile/history/cropped-image/${recordId}?_=${timestamp}`;
+            download.href = `/api/mobile/history/cropped-image/${recordId}?download=1&_=${timestamp}`;
+            download.setAttribute('download', `cropped-mobile-${recordId}.jpg`);
+            document.getElementById('modal-image-id').textContent = `${recordId} (Cropped)`;
+            overlay.innerHTML = '';
+            overlay.dataset.seconds = '';
+            overlay.dataset.bet = '';
+
+            image.onload = () => {
+                overlay.innerHTML = '';
+            };
+            document.getElementById('image-modal').style.display = 'flex';
+        }
+
+        function openBettingCroppedImageModal(button) {
+            const recordId = button.dataset.id;
+            const timestamp = Date.now();
+
+            const image = document.getElementById('modal-image');
+            const overlay = document.getElementById('modal-overlay');
+            const download = document.getElementById('download-link');
+
+            image.src = `/api/mobile/history/betting-cropped/${recordId}?_=${timestamp}`;
+            download.href = `/api/mobile/history/betting-cropped/${recordId}?download=1&_=${timestamp}`;
+            download.setAttribute('download', `betting-cropped-${recordId}.jpg`);
+            document.getElementById('modal-image-id').textContent = `${recordId} (Betting Cropped)`;
+            overlay.innerHTML = '';
+            overlay.dataset.seconds = '';
+            overlay.dataset.bet = '';
+
+            image.onload = () => {
+                overlay.innerHTML = '';
+            };
             document.getElementById('image-modal').style.display = 'flex';
         }
 
@@ -448,6 +556,29 @@ def _build_dashboard_html() -> str:
         function copyJson() {
             const content = document.getElementById('modal-json-content').textContent;
             navigator.clipboard.writeText(content).then(() => alert('ÄÃ£ copy JSON!'));
+        }
+
+        async function downloadJson(id) {
+            try {
+                const resp = await fetch(`/api/mobile/history/json/${id}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Không thể tải JSON');
+                }
+                const data = await resp.json();
+                const jsonStr = JSON.stringify(data, null, 2);
+                const blob = new Blob([jsonStr], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `json_${id}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (error) {
+                alert('Lỗi tải JSON: ' + error.message);
+            }
         }
 
         function closeJsonModal() {
@@ -558,6 +689,27 @@ async def mobile_analyze(
             except ValueError:
                 return None
 
+        def parse_signed_numeric_value(value: Optional[Union[str, int, float]]) -> Optional[int]:
+            """Parse số nguyên có giữ dấu âm/dương"""
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return int(value)
+            text = str(value).strip()
+            if not text or text == "-":
+                return None
+            # Giữ dấu âm nếu có
+            is_negative = text.startswith("-")
+            # Loại bỏ dấu +, - và dấu phân cách nghìn
+            cleaned = text.replace("+", "").replace("-", "").replace(",", "").replace(".", "")
+            if not cleaned or not cleaned.isdigit():
+                return None
+            try:
+                result = int(cleaned)
+                return -result if is_negative else result
+            except ValueError:
+                return None
+
         def parse_json_payload(raw_text: str) -> Dict[str, Any]:
             if not raw_text:
                 return {}
@@ -606,28 +758,93 @@ async def mobile_analyze(
             except ValueError:
                 return 0
 
-        base64_image = base64.b64encode(image_data).decode('utf-8')
+        # Crop ảnh trước khi gửi cho ChatGPT
+        image_for_chatgpt = image.copy()
+        cropped_region_info = None
+        
+        # Kiểm tra xem có crop region cho BETTING không
+        betting_crop_region = load_betting_crop_region()
+        if betting_crop_region:
+            # Crop theo region đã đánh dấu (giả định là BETTING)
+            # Tính tỉ lệ giữa ảnh mẫu và ảnh thực tế
+            sample_path = Path("samples/betting_sample.jpg")
+            if sample_path.exists():
+                sample_image = Image.open(sample_path)
+                sample_width, sample_height = sample_image.size
+                actual_width, actual_height = image.size
+                
+                # Tính tỉ lệ scale
+                scale_x = actual_width / sample_width
+                scale_y = actual_height / sample_height
+                
+                # Scale crop region
+                crop_x = int(betting_crop_region["x"] * scale_x)
+                crop_y = int(betting_crop_region["y"] * scale_y)
+                crop_width = int(betting_crop_region["width"] * scale_x)
+                crop_height = int(betting_crop_region["height"] * scale_y)
+                
+                # Đảm bảo không vượt quá kích thước ảnh
+                crop_x = max(0, min(crop_x, actual_width - 1))
+                crop_y = max(0, min(crop_y, actual_height - 1))
+                crop_width = min(crop_width, actual_width - crop_x)
+                crop_height = min(crop_height, actual_height - crop_y)
+                
+                if crop_width > 0 and crop_height > 0:
+                    image_for_chatgpt = image_for_chatgpt.crop((
+                        crop_x, crop_y, 
+                        crop_x + crop_width, crop_y + crop_height
+                    ))
+                    cropped_region_info = {
+                        "x": crop_x, "y": crop_y,
+                        "width": crop_width, "height": crop_height
+                    }
+        
+        # Nếu không có crop region cho BETTING, crop HISTORY như cũ
+        if not cropped_region_info:
+            crop_height = max(1, image_for_chatgpt.height // 3)
+            image_for_chatgpt = image_for_chatgpt.crop((0, 0, image_for_chatgpt.width, crop_height))
+        
+        # Convert ảnh đã crop thành bytes để encode base64
+        img_byte_arr = io.BytesIO()
+        image_for_chatgpt.save(img_byte_arr, format='JPEG', quality=95)
+        img_byte_arr.seek(0)
+        image_data_for_chatgpt = img_byte_arr.read()
+        
+        base64_image = base64.b64encode(image_data_for_chatgpt).decode('utf-8')
         openai_api_key = get_openai_api_key()
 
         detection_prompt = """Phan tich anh giao dien game va tra ve dung mot JSON theo quy tac sau:
 
-1. Neu anh la popup lich su cuoc (co tieu de "LICH SU"):
-   - Chi doc DONG DAU TIEN cua bang (phien moi nhat nam tren cung).
-   - Doc phan "Chi tiet" cua dong nay (vi du: "Dat Tai. Ket qua: Tai. Tong dat 1,000. Hoan tra 0.").
-   - Lay so trong cum "Tong dat ..." (bo dau phan cach nghin) va gan vao khoa "bet_amount" duoi dang so nguyen.
-   - Doc gia tri sau "Ket qua:" (vi du: "Tai" hoac "Xiu") va gan vao khoa "result" voi gia tri 'Tai' hoac 'Xiu'.
-   - So sanh gia tri sau "Dat" va sau "Ket qua":
-       * Neu giong nhau -> "win_loss" = "win".
-       * Neu khac nhau -> "win_loss" = "loss".
-       * Neu phan "Ket qua" thieu hoac hien thi trang thai cho -> "win_loss" = null.
-   - Lay so phien o cot "Phien" cua dong nay lam gia tri cho khoa "Id" (bo ky tu "#" neu co).
-   - Tra ve dung JSON: {"image_type":"HISTORY","Id":"<ma phien>","result":"Tai|Xiu","bet_amount":<so tien>}.
+1. Neu anh la popup lich su cuoc (co tieu de "LICH SU" hoac "LỊCH SỬ"):
+   - Day la man hinh HIEN THI BANG LICH SU cac phien da choi, co bang du lieu voi cac cot: Phiên, Tổng cược, Tiền thắng, etc.
+   - Chi doc DONG DAU TIEN cua bang (phien moi nhat nam tren cung, dong dau tien trong bang).
+   - Doc gia tri o cot "Tổng cược" (cot thu 3) cua DONG DAU TIEN va gan vao khoa "bet_amount" duoi dang so nguyen (bo dau phan cach nghin, vi du: "1,000" -> 1000, "4,000" -> 4000).
+   - Doc gia tri o cot "Tiền thắng" (cot thu 4) cua DONG DAU TIEN. Day la cot quan trong nhat de xac dinh win_loss:
+       * Neu cot "Tiền thắng" hien thi dau gach ngang "-" (khong co so) -> gan "winnings_amount" = null va "win_loss" = "unknown".
+       * Neu cot "Tiền thắng" hien thi so duong (co dau + hoac khong, vi du: "+980", "+3,920", "980") -> lay so nguyen (bo dau + va dau phan cach nghin) va gan vao "winnings_amount", sau do gan "win_loss" = "win".
+       * Neu cot "Tiền thắng" hien thi so am (co dau -, vi du: "-1,000", "-500") -> lay so nguyen (bo dau - va dau phan cach nghin) va gan vao "winnings_amount" NHUNG GIU NGUYEN DAU AM (vi du: -1000), sau do gan "win_loss" = "loss".
+       * Neu cot "Tiền thắng" hien thi "0" -> gan "winnings_amount" = 0 va "win_loss" = null.
+   - LUU Y: Chi doc cot "Tiền thắng" trong bang, KHONG doc tu phan "Chi tiết". Gia tri "win_loss" PHẢI dựa vào cot "Tiền thắng" (duong = win, am = loss, "-" = unknown).
+   - Lay so phien o cot "Phiên" (cot thu 1) cua DONG DAU TIEN lam gia tri cho khoa "Id" (bo ky tu "#" neu co).
+   - Tra ve dung JSON: {"image_type":"HISTORY","Id":"<ma phien>","bet_amount":<so tien>,"winnings_amount":<so tien thang/thua hoac null>,"win_loss":<"win"|"loss"|"unknown"|null>}.
 
-2. Neu anh la man hinh dang cuoc:
-   - Chi lay SO GIAY o dong ho dem nguoc giua man hinh.
-   - Tra ve JSON: {"image_type":"GAME","seconds":<so giay>}.
+2. Neu anh la man hinh DANG CUOC (man hinh choi game chinh):
+   - Day la man hinh CO DONG HO DEM NGUOC (timer countdown) hien thi so giay con lai.
+   - Man hinh nay CO NUT "ĐẶT CƯỢC" hoac "TẤT TAY" hoac "CƯỢC" de dat cuoc.
+   - Man hinh nay CO CAC LUA CHON CUOC nhu "TÀI" (Tai) va "XỈU" (Xiu) hoac cac lua chon tuong tu.
+   - Man hinh nay KHONG CO bang lich su, KHONG CO popup, la man hinh chinh cua game.
+   - QUAN TRONG NHAT: Doc SO GIAY tu bo dem thoi gian:
+       * Ban la mo hinh doc hieu hinh anh (OCR) chuyen xac dinh bo dem thoi gian.
+       * Tim VONG TRON LON co VIEN VANG/CAM o CHINH GIUA man hinh (khong phai o tren, khong phai o duoi, khong phai o ben canh).
+       * Chi doc SO NAM TRONG VONG TRON nay thoi.
+       * So giay la SO NHO co 1-2 chu so (tu 1 den 60, vi du: 26, 39, 40, 38, 25, 10, 5).
+       * BO QUA TAT CA cac so lon hon 2 chu so (vi du: 31,608,201, 32,971,000, 33,232,000 - day la so tien, KHONG PHAI so giay).
+       * BO QUA cac so o banner tren cung, o banner duoi cung, o ben trai, o ben phai.
+       * BO QUA moi chu, bieu tuong, so phiên (#535825), so tien, so nguoi choi.
+       * CHI DOC SO TRONG VONG TRON O GIUA MAN HINH, khong doc so o vi tri khac.
+   - Tra ve JSON: {"image_type":"BETTING","seconds":<so giay>}.
 
-3. Neu khong xac dinh duoc loai anh, tra ve {"image_type":"UNKNOWN"}.
+3. Neu khong xac dinh duoc loai anh (khong phai HISTORY, khong phai BETTING), tra ve {"image_type":"UNKNOWN"}.
 
 CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
 
@@ -672,12 +889,15 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
         parsed_response = parse_json_payload(chatgpt_text)
         image_type_hint = str(parsed_response.get("image_type") or "").upper()
         if not image_type_hint:
-            if "TYPE: HISTORY" in chatgpt_text:
+            if "TYPE: HISTORY" in chatgpt_text.upper() or '"image_type":"HISTORY"' in chatgpt_text.upper():
                 image_type_hint = "HISTORY"
-            elif "TYPE: GAME" in chatgpt_text or "TYPE: BETTING" in chatgpt_text:
-                image_type_hint = "GAME"
+            elif "TYPE: GAME" in chatgpt_text.upper() or "TYPE: BETTING" in chatgpt_text.upper() or '"image_type":"GAME"' in chatgpt_text.upper() or '"image_type":"BETTING"' in chatgpt_text.upper():
+                image_type_hint = "BETTING"
+        # Normalize: "GAME" -> "BETTING" for consistency
+        if image_type_hint == "GAME":
+            image_type_hint = "BETTING"
         is_history = image_type_hint == "HISTORY"
-        is_betting = image_type_hint in {"GAME", "BETTING"}
+        is_betting = image_type_hint == "BETTING"
 
         base_response_data = {
             "device_name": device_name,
@@ -726,19 +946,58 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                 if amount_match:
                     bet_amount_value = parse_numeric_value(amount_match.group(1))
 
-            result_value = parsed_response.get("result") or parsed_response.get("Result")
-            if not result_value:
-                detail_match = re.search(r'Đặt\s+([A-Za-zÀ-ỹ]+).*?Kết\s+quả:\s*([A-Za-zÀ-ỹ]+)', chatgpt_text, re.IGNORECASE | re.DOTALL)
-                if detail_match:
-                    result_value = detail_match.group(2)
-
-            bet_choice_norm = normalize_choice(betting_method)
-            result_choice_norm = normalize_choice(result_value)
-
-            if bet_choice_norm and result_choice_norm:
-                win_loss_token = "win" if bet_choice_norm == result_choice_norm else "loss"
+            winnings_amount_raw = parsed_response.get("winnings_amount")
+            win_loss_from_ai = parsed_response.get("win_loss")
+            
+            # Parse winnings_amount với hàm giữ dấu âm
+            winnings_amount_value = parse_signed_numeric_value(winnings_amount_raw)
+            
+            # Fallback: nếu không parse được từ JSON, thử parse từ text response
+            if winnings_amount_value is None and chatgpt_text:
+                try:
+                    # Tìm winnings_amount trong text response
+                    winnings_match = re.search(r'"winnings_amount"\s*:\s*(-?\d+|null)', chatgpt_text)
+                    if winnings_match:
+                        winnings_str = winnings_match.group(1)
+                        if winnings_str != "null":
+                            winnings_amount_value = int(winnings_str)
+                    # Nếu vẫn không có, thử tìm pattern khác
+                    if winnings_amount_value is None:
+                        # Tìm số âm/dương trong cột "Tiền thắng"
+                        tien_thang_match = re.search(r'Tiền thắng.*?([+-]?\d{1,3}(?:,\d{3})*)', chatgpt_text, re.IGNORECASE)
+                        if tien_thang_match:
+                            winnings_str = tien_thang_match.group(1).replace(",", "")
+                            winnings_amount_value = int(winnings_str)
+                except Exception:
+                    pass
+            
+            # Xử lý win_loss dựa trên winnings_amount từ AI response
+            # Ưu tiên dùng win_loss từ AI nếu có, nếu không thì tính từ winnings_amount
+            if win_loss_from_ai == "unknown":
+                win_loss_token = "unknown"
+            elif winnings_amount_raw is None or (isinstance(winnings_amount_raw, str) and winnings_amount_raw.strip() == "-"):
+                # Kiểm tra nếu "Tiền thắng" là "-" trong text response
+                if '"win_loss"\s*:\s*"unknown"' in chatgpt_text or re.search(r'Tiền thắng.*?[-]', chatgpt_text, re.IGNORECASE):
+                    win_loss_token = "unknown"
+                else:
+                    win_loss_token = None
+            elif winnings_amount_value is not None:
+                # Dựa vào giá trị số: dương = win, âm = loss, 0 = null
+                if winnings_amount_value > 0:
+                    win_loss_token = "win"
+                elif winnings_amount_value < 0:
+                    win_loss_token = "loss"
+                else:
+                    win_loss_token = None
+            elif win_loss_from_ai in ["win", "loss"]:
+                # Nếu AI đã trả về win_loss trực tiếp, dùng nó
+                win_loss_token = win_loss_from_ai
             else:
-                win_loss_token = None
+                # Fallback: kiểm tra trong text response
+                if '"win_loss"\s*:\s*"unknown"' in chatgpt_text:
+                    win_loss_token = "unknown"
+                else:
+                    win_loss_token = None
 
             win_loss_label = win_label_from_token(win_loss_token)
 
@@ -781,21 +1040,38 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                 "betting_method": betting_method,
                 "image_type": "HISTORY",
                 "bet_amount": bet_amount_value,
+                "tien_thang": winnings_amount_value,
+                "winnings_amount": winnings_amount_value,  # Alias cho tương thích
                 "win_loss": win_loss_token,
             }
 
         elif is_betting:
+            # Ưu tiên lấy seconds từ ChatGPT response
             seconds_from_ai = parse_numeric_value(parsed_response.get("seconds"))
             seconds_from_region = None
             seconds_coords = parse_region_coords(seconds_region_coords)
             if seconds_coords:
                 seconds_from_region = extract_number_from_region(image, seconds_coords)
 
+            # Ưu tiên giá trị từ ChatGPT, fallback sang OCR region, cuối cùng là 0
             seconds_value = (
                 seconds_from_ai
                 if seconds_from_ai is not None
                 else (seconds_from_region if seconds_from_region is not None else 0)
             )
+
+            # Lưu ảnh crop nếu có
+            cropped_image_path = None
+            if cropped_region_info and image_for_chatgpt:
+                try:
+                    # Lưu ảnh crop vào cùng thư mục với ảnh gốc
+                    original_dir = Path(saved_path).parent
+                    original_name = Path(saved_path).stem
+                    cropped_image_path = original_dir / f"cropped_{original_name}.jpg"
+                    image_for_chatgpt.save(cropped_image_path, format='JPEG', quality=95)
+                    cropped_image_path = str(cropped_image_path)
+                except Exception as exc:
+                    print(f"Error saving cropped image: {exc}")
 
             mobile_betting_service.save_analysis_history(
                 {
@@ -816,12 +1092,13 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                 }
             )
 
+            # Đảm bảo seconds luôn có trong JSON response cho client
             response_data = {
                 "id": "",
                 "Device name": device_name,
                 "betting_method": betting_method,
                 "image_type": "BETTING",
-                "seconds": seconds_value,
+                "seconds": seconds_value,  # Giá trị giây đọc được từ ChatGPT hoặc OCR
             }
 
         else:
@@ -914,6 +1191,245 @@ async def get_mobile_history_image(record_id: int, download: bool = Query(False)
         raise HTTPException(status_code=500, detail=f"Lá»—i láº¥y áº£nh: {exc}")
 
 
+@app.get("/api/mobile/history/cropped-image/{record_id}")
+async def get_mobile_history_cropped_image(record_id: int, download: bool = Query(False)):
+    try:
+        conn = sqlite3.connect("logs.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT image_path, image_type
+            FROM mobile_analysis_history
+            WHERE id = ?
+            """,
+            (record_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            raise HTTPException(status_code=404, detail="Không tìm thấy ảnh")
+
+        image_path = row[0]
+        image_type = row[1] if len(row) > 1 else None
+        
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail=f"File ảnh không tồn tại: {image_path}")
+
+        # Chỉ crop nếu image_type là HISTORY, BETTING giữ nguyên
+        if image_type == "HISTORY":
+            # Đọc và crop ảnh thành 1/3 chiều cao (phần trên cùng)
+            image = Image.open(image_path)
+            crop_height = max(1, image.height // 3)
+            cropped_image = image.crop((0, 0, image.width, crop_height))
+            
+            # Lưu ảnh crop vào memory
+            img_byte_arr = io.BytesIO()
+            cropped_image.save(img_byte_arr, format='JPEG', quality=95)
+            img_byte_arr.seek(0)
+            
+            extension = os.path.splitext(image_path)[1].lower()
+            media_type = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+            }.get(extension, "image/jpeg")
+            
+            filename = f"cropped_{os.path.basename(image_path)}" if download else None
+            return Response(content=img_byte_arr.read(), media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'} if filename else {})
+        else:
+            # BETTING hoặc các loại khác: trả về ảnh gốc
+            extension = os.path.splitext(image_path)[1].lower()
+            media_type = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+            }.get(extension, "image/jpeg")
+            
+            filename = os.path.basename(image_path) if download else None
+            return FileResponse(image_path, media_type=media_type, filename=filename)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy ảnh crop: {exc}")
+
+
+def load_betting_crop_region() -> Optional[Dict[str, int]]:
+    """Load betting crop region from config file"""
+    try:
+        crop_config_path = Path("samples/betting_crop_region.json")
+        if crop_config_path.exists():
+            with open(crop_config_path, "r") as f:
+                return json.load(f)
+        return None
+    except Exception as exc:
+        print(f"Error loading crop region: {exc}")
+        return None
+
+
+def detect_green_crop_region(image_path: str) -> Optional[Dict[str, int]]:
+    """Detect green region (#1AFF0D) in image and return bounding box"""
+    try:
+        image = Image.open(image_path)
+        img_array = np.array(image)
+        
+        # Convert to RGB if needed
+        if len(img_array.shape) == 2:
+            return None
+        if img_array.shape[2] == 4:  # RGBA
+            img_array = img_array[:, :, :3]
+        
+        # Color #1AFF0D = RGB(26, 255, 13)
+        # Allow some tolerance for color matching
+        green_color = np.array([26, 255, 13])
+        tolerance = 10
+        
+        # Find pixels matching green color
+        lower_bound = green_color - tolerance
+        upper_bound = green_color + tolerance
+        lower_bound = np.clip(lower_bound, 0, 255)
+        upper_bound = np.clip(upper_bound, 0, 255)
+        
+        mask = np.all((img_array >= lower_bound) & (img_array <= upper_bound), axis=2)
+        
+        if not np.any(mask):
+            return None
+        
+        # Find bounding box
+        rows = np.any(mask, axis=1)
+        cols = np.any(mask, axis=0)
+        
+        if not np.any(rows) or not np.any(cols):
+            return None
+        
+        y_min, y_max = np.where(rows)[0][[0, -1]]
+        x_min, x_max = np.where(cols)[0][[0, -1]]
+        
+        return {
+            "x": int(x_min),
+            "y": int(y_min),
+            "width": int(x_max - x_min + 1),
+            "height": int(y_max - y_min + 1)
+        }
+    except Exception as exc:
+        print(f"Error detecting green region: {exc}")
+        return None
+
+
+@app.post("/api/mobile/betting-sample/upload")
+async def upload_betting_sample(file: UploadFile = File(...)):
+    """Upload or replace BETTING sample image and detect crop region"""
+    try:
+        # Create samples directory if not exists
+        samples_dir = Path("samples")
+        samples_dir.mkdir(exist_ok=True)
+        
+        # Save as betting_sample.jpg (replace if exists)
+        sample_path = samples_dir / "betting_sample.jpg"
+        
+        # Read and save image
+        image_data = await file.read()
+        with open(sample_path, "wb") as f:
+            f.write(image_data)
+        
+        # Detect green crop region (#1AFF0D)
+        crop_region = detect_green_crop_region(str(sample_path))
+        
+        # Save crop region to JSON file
+        crop_config_path = samples_dir / "betting_crop_region.json"
+        if crop_region:
+            with open(crop_config_path, "w") as f:
+                json.dump(crop_region, f)
+        else:
+            # Remove config if no region detected
+            if crop_config_path.exists():
+                crop_config_path.unlink()
+        
+        return {
+            "success": True,
+            "message": "Betting sample image uploaded successfully",
+            "path": str(sample_path),
+            "crop_region": crop_region
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
+
+
+@app.get("/api/mobile/history/betting-cropped/{record_id}")
+async def get_betting_cropped_image(record_id: int, download: bool = Query(False)):
+    """Get cropped BETTING image from screenshot"""
+    try:
+        conn = sqlite3.connect("logs.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT image_path, image_type
+            FROM mobile_analysis_history
+            WHERE id = ?
+            """,
+            (record_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            raise HTTPException(status_code=404, detail="Không tìm thấy ảnh")
+
+        image_path = row[0]
+        image_type = row[1] if len(row) > 1 else None
+        
+        if image_type != "BETTING":
+            raise HTTPException(status_code=400, detail="Chỉ hỗ trợ BETTING image type")
+
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail=f"File ảnh không tồn tại: {image_path}")
+
+        # Tìm ảnh crop (cropped_{original_name}.jpg)
+        original_dir = Path(image_path).parent
+        original_name = Path(image_path).stem
+        cropped_image_path = original_dir / f"cropped_{original_name}.jpg"
+        
+        if not cropped_image_path.exists():
+            raise HTTPException(status_code=404, detail="Ảnh crop không tồn tại")
+
+        extension = os.path.splitext(str(cropped_image_path))[1].lower()
+        media_type = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(extension, "image/jpeg")
+        
+        filename = f"betting_cropped_{record_id}.jpg" if download else None
+        return FileResponse(str(cropped_image_path), media_type=media_type, filename=filename)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy ảnh crop: {exc}")
+
+
+@app.get("/api/mobile/betting-sample")
+async def get_betting_sample():
+    """Get BETTING sample image"""
+    try:
+        sample_path = Path("samples/betting_sample.jpg")
+        if not sample_path.exists():
+            raise HTTPException(status_code=404, detail="Betting sample image not found")
+        
+        return FileResponse(sample_path, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting sample: {exc}")
+
+
 @app.get("/api/mobile/history/json/{record_id}")
 async def download_mobile_history_json(record_id: int):
     try:
@@ -946,15 +1462,70 @@ async def download_mobile_history_json(record_id: int):
                 "seconds": record.get("seconds_remaining"),
             }
         elif image_type == "HISTORY":
+            # Parse tien_thang từ chatgpt_response nếu có
+            tien_thang_value = None
+            chatgpt_response = record.get("chatgpt_response")
+            if chatgpt_response:
+                try:
+                    # Pattern 1: Tìm winnings_amount trong JSON response (nhiều format)
+                    patterns = [
+                        r'"winnings_amount"\s*:\s*(-?\d+|null)',
+                        r'"winnings_amount"\s*:\s*"?(-?\d+(?:,\d{3})*)"?',
+                        r'winnings_amount["\s]*:[\s]*(-?\d+)',
+                        r'"Tiền thắng"\s*:\s*(-?\d+|null)',
+                    ]
+                    for pattern in patterns:
+                        winnings_match = re.search(pattern, chatgpt_response, re.IGNORECASE)
+                        if winnings_match:
+                            winnings_str = winnings_match.group(1)
+                            if winnings_str and winnings_str.lower() != "null":
+                                winnings_str = winnings_str.replace(",", "").replace("+", "")
+                                if winnings_str.startswith("-"):
+                                    tien_thang_value = -int(winnings_str[1:])
+                                else:
+                                    tien_thang_value = int(winnings_str)
+                                break
+                    
+                    # Pattern 2: Tìm số trong cột "Tiền thắng" từ text mô tả
+                    if tien_thang_value is None:
+                        tien_thang_patterns = [
+                            r'Tiền thắng.*?([+-]?\d{1,3}(?:,\d{3})*)',
+                            r'Tiền thắng.*?(-?\d+)',
+                            r'winnings.*?([+-]?\d{1,3}(?:,\d{3})*)',
+                        ]
+                        for pattern in tien_thang_patterns:
+                            tien_thang_match = re.search(pattern, chatgpt_response, re.IGNORECASE)
+                            if tien_thang_match:
+                                winnings_str = tien_thang_match.group(1).replace(",", "").replace("+", "")
+                                if winnings_str and winnings_str != "-":
+                                    if winnings_str.startswith("-"):
+                                        tien_thang_value = -int(winnings_str[1:])
+                                    else:
+                                        tien_thang_value = int(winnings_str)
+                                    break
+                except Exception as e:
+                    # Log error nhưng không crash
+                    pass
+            
             payload = {
                 **base_payload,
                 "bet_amount": record.get("bet_amount"),
+                "tien_thang": tien_thang_value,
+                "winnings_amount": tien_thang_value,  # Alias cho tương thích
                 "win_loss": win_token_from_label(record.get("win_loss")),
             }
         else:
             payload = base_payload
 
+        # Giữ tien_thang và winnings_amount ngay cả khi None, nhưng loại bỏ các field None khác
+        tien_thang_val = payload.pop("tien_thang", None)
+        winnings_amount_val = payload.pop("winnings_amount", None)
         filtered_payload = {k: v for k, v in payload.items() if v is not None}
+        # Thêm lại tien_thang và winnings_amount vào cuối (LUÔN thêm, kể cả khi None)
+        if image_type == "HISTORY":
+            # Đảm bảo luôn có field này trong JSON, ngay cả khi None (sẽ hiển thị null)
+            filtered_payload["tien_thang"] = tien_thang_val
+            filtered_payload["winnings_amount"] = winnings_amount_val
 
         return filtered_payload
 
