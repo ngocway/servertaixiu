@@ -904,60 +904,32 @@ async def download_mobile_history_json(record_id: int):
             raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y dá»¯ liá»‡u")
 
         record = dict(row)
-        payload: Dict[str, Any] = {
+        base_payload: Dict[str, Any] = {
             "id": record.get("id"),
             "device_name": record.get("device_name"),
             "betting_method": record.get("betting_method"),
             "image_type": record.get("image_type"),
-            "analysis_time": record.get("created_at"),
-            "session_id": record.get("session_id"),
-            "planned_bet_amount": record.get("bet_amount"),
-            "placed_bet_amount": record.get("actual_bet_amount"),
-            "bet_amount": record.get("bet_amount"),
-            "actual_bet_amount": record.get("actual_bet_amount"),
-        }
-        payload["regions"] = {
-            "seconds": record.get("seconds_region_coords"),
-            "bet_amount": record.get("bet_region_coords"),
         }
 
-        if record.get("image_type") == "HISTORY":
-            payload.update(
-                {
-                    "win_loss": record.get("win_loss"),
-                    "multiplier": record.get("multiplier"),
-                }
-            )
-        elif record.get("image_type") == "BETTING":
-            payload.update(
-                {
-                    "seconds": record.get("seconds_remaining"),
-                    "bet_status": record.get("bet_status"),
-                }
-            )
+        image_type = record.get("image_type")
+
+        if image_type == "BETTING":
+            payload: Dict[str, Any] = {
+                **base_payload,
+                "seconds": record.get("seconds_remaining"),
+            }
+        elif image_type == "HISTORY":
+            payload = {
+                **base_payload,
+                "bet_amount": record.get("bet_amount"),
+                "win_loss": record.get("win_loss"),
+            }
         else:
-            payload.update(
-                {
-                    "bet_status": record.get("bet_status"),
-                    "win_loss": record.get("win_loss"),
-                    "multiplier": record.get("multiplier"),
-                    "seconds": record.get("seconds_remaining"),
-                }
-            )
+            payload = base_payload
 
-        verification_fields = {
-            "confidence": record.get("confidence_score"),
-            "verified_at": record.get("verified_at"),
-            "mismatch_detected": record.get("mismatch_detected"),
-            "actual_bet_amount": record.get("actual_bet_amount"),
-            "retry_count": record.get("retry_count"),
-            "verification_screenshot_path": record.get("verification_screenshot_path"),
-        }
+        filtered_payload = {k: v for k, v in payload.items() if v is not None}
 
-        if any(value is not None for value in verification_fields.values()):
-            payload["verification"] = verification_fields
-
-        return payload
+        return filtered_payload
 
     except HTTPException:
         raise
