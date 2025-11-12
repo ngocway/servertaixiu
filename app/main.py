@@ -58,8 +58,10 @@ async def health_check():
 async def admin_dashboard():
     html_path = Path(__file__).with_name("run_mobile_dashboard.html")
     html_content = html_path.read_text(encoding="utf-8") if html_path.exists() else _build_dashboard_html()
-    return HTMLResponse(
-        content=html_content,
+    html_bytes = html_content.encode('utf-8')
+    return Response(
+        content=html_bytes,
+        media_type="text/html; charset=utf-8",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
             "Pragma": "no-cache",
