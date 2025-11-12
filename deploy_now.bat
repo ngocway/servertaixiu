@@ -27,22 +27,18 @@ if errorlevel 1 (
 )
 echo.
 
-echo [Step 2/4] Checking if Git is setup on VPS...
+echo [Step 2/4] Checking if Git repository exists on VPS...
 echo Checking VPS Git repository...
-ssh %VPS_USER%@%VPS_IP% "test -d ~/screenshot-analyzer.git" 2>nul
-if errorlevel 1 (
-    echo Git repository not found on VPS.
-    echo You need to run setup_with_password.bat first.
-    echo.
-    echo Press Enter to continue (will try to setup Git on VPS)...
-    pause >nul
-    
-    echo Setting up Git on VPS...
-    call setup_with_password.bat
-    goto :deploy_code
-) else (
-    echo Git is setup on VPS
-)
+ssh %VPS_USER%@%VPS_IP% "test -d ~/screenshot-analyzer.git" 1>nul 2>nul
+if errorlevel 1 goto repo_missing
+echo Git repository is available on VPS.
+goto deploy_code
+
+:repo_missing
+echo Git repository chưa được thiết lập trên VPS.
+echo Vui lòng chạy setup_with_password.bat một lần để tạo repository, sau đó thử deploy lại.
+pause
+exit /b 1
 
 :deploy_code
 echo.
