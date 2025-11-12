@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import unicodedata
 
 import httpx
 from PIL import Image, ImageOps, ImageEnhance
@@ -27,6 +28,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def normalize_choice(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = unicodedata.normalize("NFD", str(value))
+    text = ''.join(ch for ch in text if unicodedata.category(ch) != 'Mn')
+    text = text.lower().strip()
+    if text.startswith("tai"):
+        return "tai"
+    if text.startswith("xiu"):
+        return "xiu"
+    return None
+
+
+def win_label_from_token(token: Optional[str]) -> Optional[str]:
+    if token == "win":
+        return "Thắng"
+    if token == "loss":
+        return "Thua"
+    return None
+
+
+def win_token_from_label(label: Optional[str]) -> Optional[str]:
+    if label is None:
+        return None
+    text = unicodedata.normalize("NFD", str(label))
+    text = ''.join(ch for ch in text if unicodedata.category(ch) != 'Mn')
+    text = text.lower().strip()
+    if text.startswith("thang"):
+        return "win"
+    if text.startswith("thua"):
+        return "loss"
+    return None
 
 
 def get_openai_api_key() -> str:
@@ -539,6 +573,8 @@ async def mobile_analyze(
             except Exception:
                 return {}
 
+        
+
         def extract_number_from_region(base_image: Image.Image, coords: Optional[tuple]) -> int:
             if not coords:
                 return 0
@@ -579,12 +615,13 @@ async def mobile_analyze(
    - Chi doc DONG DAU TIEN cua bang (phien moi nhat nam tren cung).
    - Doc phan "Chi tiet" cua dong nay (vi du: "Dat Tai. Ket qua: Tai. Tong dat 1,000. Hoan tra 0.").
    - Lay so trong cum "Tong dat ..." (bo dau phan cach nghin) va gan vao khoa "bet_amount" duoi dang so nguyen.
+   - Doc gia tri sau "Ket qua:" (vi du: "Tai" hoac "Xiu") va gan vao khoa "result" voi gia tri 'Tai' hoac 'Xiu'.
    - So sanh gia tri sau "Dat" va sau "Ket qua":
        * Neu giong nhau -> "win_loss" = "win".
        * Neu khac nhau -> "win_loss" = "loss".
        * Neu phan "Ket qua" thieu hoac hien thi trang thai cho -> "win_loss" = null.
    - Lay so phien o cot "Phien" cua dong nay lam gia tri cho khoa "Id" (bo ky tu "#" neu co).
-   - Tra ve dung JSON: {"image_type":"HISTORY","Id":"<ma phien>","bet_amount":<so tien>,"win_loss":<"win"|"loss"|null>}.
+   - Tra ve dung JSON: {"image_type":"HISTORY","Id":"<ma phien>","result":"Tai|Xiu","bet_amount":<so tien>}.
 
 2. Neu anh la man hinh dang cuoc:
    - Chi lay SO GIAY o dong ho dem nguoc giua man hinh.
@@ -689,31 +726,21 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                 if amount_match:
                     bet_amount_value = parse_numeric_value(amount_match.group(1))
 
-            win_loss_token = None
-            win_loss_value = parsed_response.get("win_loss")
-            if isinstance(win_loss_value, str):
-                normalized = win_loss_value.strip().lower()
-                if normalized in {"win", "won"}:
-                    win_loss_token = "win"
-                elif normalized in {"loss", "lose", "lost"}:
-                    win_loss_token = "loss"
-                elif normalized in {"null", "none", "pending", ""}:
-                    win_loss_token = None
+            result_value = parsed_response.get("result") or parsed_response.get("Result")
+            if not result_value:
+                detail_match = re.search(r'Đặt\s+([A-Za-zÀ-ỹ]+).*?Kết\s+quả:\s*([A-Za-zÀ-ỹ]+)', chatgpt_text, re.IGNORECASE | re.DOTALL)
+                if detail_match:
+                    result_value = detail_match.group(2)
 
-            if win_loss_token is None:
-                win_loss_match = re.search(r'"win_loss"\s*:\s*"([^"]+)"', chatgpt_text, re.IGNORECASE)
-                if win_loss_match:
-                    normalized = win_loss_match.group(1).strip().lower()
-                    if normalized in {"win", "won"}:
-                        win_loss_token = "win"
-                    elif normalized in {"loss", "lose", "lost"}:
-                        win_loss_token = "loss"
+            bet_choice_norm = normalize_choice(betting_method)
+            result_choice_norm = normalize_choice(result_value)
 
-            win_loss_label = None
-            if win_loss_token == "win":
-                win_loss_label = "Tháº¯ng"
-            elif win_loss_token == "loss":
-                win_loss_label = "Thua"
+            if bet_choice_norm and result_choice_norm:
+                win_loss_token = "win" if bet_choice_norm == result_choice_norm else "loss"
+            else:
+                win_loss_token = None
+
+            win_loss_label = win_label_from_token(win_loss_token)
 
             session_id_for_db = None
             if session_id_clean:
@@ -922,7 +949,7 @@ async def download_mobile_history_json(record_id: int):
             payload = {
                 **base_payload,
                 "bet_amount": record.get("bet_amount"),
-                "win_loss": record.get("win_loss"),
+                "win_loss": win_token_from_label(record.get("win_loss")),
             }
         else:
             payload = base_payload
