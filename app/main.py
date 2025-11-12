@@ -60,7 +60,7 @@ async def admin_dashboard():
     html_content = html_path.read_text(encoding="utf-8") if html_path.exists() else _build_dashboard_html()
     return Response(
         content=html_content,
-        media_type="text/html",
+        media_type="text/html; charset=utf-8",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
             "Pragma": "no-cache",
