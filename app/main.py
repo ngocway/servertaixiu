@@ -1783,24 +1783,26 @@ async def mobile_analyze(
         
         # Prompt ChatGPT để detect loại ảnh và extract data
         # Dùng ngôn ngữ trung lập để tránh bị từ chối
-        detection_prompt = """Phân tích ảnh giao diện game và trả về đúng một JSON theo quy tắc sau:
+        detection_prompt = """Phan tich anh giao dien game va tra ve dung mot JSON theo quy tac sau:
 
-1. Nếu ảnh là popup lịch sử cược (có tiêu đề "LỊCH SỬ"):
-   - Chỉ đọc DÒNG ĐẦU TIÊN của bảng (dòng nằm trên cùng, ví dụ đã khoanh đỏ).
-   - Lấy đúng số tiền tại cột "Tổng cược" của dòng đó và giữ nguyên dấu phẩy ngăn cách nghìn → gán vào khóa "bet_amount".
-   - Đọc giá trị tại cột "Tiền thắng" (hoặc "Kết quả") của cùng dòng:
-       • Nếu số dương → "win_loss" = "Thắng".
-       • Nếu số âm hoặc 0 → "win_loss" = "Thua".
-   - Lấy số phiên ở cột "Phiên" của dòng đó làm giá trị cho khóa "id".
-   - Trả về đúng JSON: {"image_type":"HISTORY","id":"<mã phiên>","bet_amount":"<số tiền>","win_loss":"Thắng|Thua"}.
+1. Neu anh la popup lich su cuoc (co tieu de "LICH SU"):
+   - Chi doc DONG DAU TIEN cua bang (phien moi nhat nam tren cung).
+   - Doc phan "Chi tiet" cua dong nay (vi du: "Dat Tai. Ket qua: Tai. Tong dat 1,000. Hoan tra 0.").
+   - Lay so trong cum "Tong dat ..." (bo dau phan cach nghin) va gan vao khoa "bet_amount" duoi dang so nguyen.
+   - So sanh gia tri sau "Dat" va sau "Ket qua":
+       * Neu giong nhau -> "win_loss" = "win".
+       * Neu khac nhau -> "win_loss" = "loss".
+       * Neu phan "Ket qua" thieu hoac hien thi trang thai cho -> "win_loss" = null.
+   - Lay so phien o cot "Phien" cua dong nay lam gia tri cho khoa "Id" (bo ky tu "#" neu co).
+   - Tra ve dung JSON: {"image_type":"HISTORY","Id":"<ma phien>","bet_amount":<so tien>,"win_loss":<"win"|"loss"|null>}.
 
-2. Nếu ảnh là màn hình đang cược:
-   - Chỉ lấy SỐ GIÂY (ô đồng hồ đếm ngược ở giữa màn hình, ví dụ đã khoanh đỏ).
-   - Trả về JSON: {"image_type":"GAME","seconds":"<số giây đọc được>"}.
+2. Neu anh la man hinh dang cuoc:
+   - Chi lay SO GIAY o dong ho dem nguoc giua man hinh.
+   - Tra ve JSON: {"image_type":"GAME","seconds":<so giay>}.
 
-3. Nếu không xác định được loại ảnh, trả về {"image_type":"UNKNOWN"}.
+3. Neu khong xac dinh duoc loai anh, tra ve {"image_type":"UNKNOWN"}.
 
-CHỈ trả về JSON thuần (không kèm giải thích, không dùng code block)."""
+CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
 
         # Call ChatGPT
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1874,7 +1876,11 @@ CHỈ trả về JSON thuần (không kèm giải thích, không dùng code bloc
         if is_history:
             import re
 
-            session_id_raw = parsed_response.get("id")
+            session_id_raw = (
+                parsed_response.get("Id")
+                or parsed_response.get("id")
+                or parsed_response.get("session_id")
+            )
             session_id_clean = None
             if session_id_raw is not None:
                 session_id_clean = str(session_id_raw).strip()
@@ -1883,42 +1889,42 @@ CHỈ trả về JSON thuần (không kèm giải thích, không dùng code bloc
                     session_id_clean = None
 
             if not session_id_clean:
-                session_match = re.search(r'"id"\s*:\s*"?(#?\d+)"?', chatgpt_text)
+                session_match = re.search(r'"(?:Id|id)"\s*:\s*"?(#?\d+)"?', chatgpt_text)
                 if session_match:
                     session_id_clean = session_match.group(1).lstrip("#")
 
             bet_amount_raw = parsed_response.get("bet_amount")
             bet_amount_value = parse_numeric_value(bet_amount_raw)
             if bet_amount_value is None:
-                bet_amount_value = 0
-            bet_amount_display = None
-            if bet_amount_raw is not None:
-                bet_amount_display = str(bet_amount_raw).strip()
-            if bet_amount_display and bet_amount_value:
-                sanitized = ''.join(ch for ch in bet_amount_display if ch.isdigit())
-                has_separator = any(ch in {',', '.'} for ch in bet_amount_display)
-                if sanitized.isdigit() and not has_separator:
-                    bet_amount_display = f"{bet_amount_value:,}".replace(",", ",")
-            if not bet_amount_display:
-                bet_amount_display = f"{bet_amount_value:,}" if bet_amount_value is not None else "0"
+                amount_match = re.search(r'"bet_amount"\s*:\s*"?([0-9.,]+)"?', chatgpt_text)
+                if amount_match:
+                    bet_amount_value = parse_numeric_value(amount_match.group(1))
 
+            win_loss_token = None
             win_loss_value = parsed_response.get("win_loss")
-            win_loss = None
             if isinstance(win_loss_value, str):
                 normalized = win_loss_value.strip().lower()
-                if normalized.startswith("thă") or normalized.startswith("thang"):
-                    win_loss = "Thắng"
-                elif normalized.startswith("thua"):
-                    win_loss = "Thua"
+                if normalized in ("win", "won"):
+                    win_loss_token = "win"
+                elif normalized in ("loss", "lose", "lost"):
+                    win_loss_token = "loss"
+                elif normalized in ("null", "none", "pending", ""):
+                    win_loss_token = None
 
-            if win_loss is None:
-                win_loss_match = re.search(r'"win_loss"\s*:\s*"([^"]+)"', chatgpt_text)
+            if win_loss_token is None:
+                win_loss_match = re.search(r'"win_loss"\s*:\s*"([^"]+)"', chatgpt_text, re.IGNORECASE)
                 if win_loss_match:
                     normalized = win_loss_match.group(1).strip().lower()
-                    if normalized.startswith("thă") or normalized.startswith("thang"):
-                        win_loss = "Thắng"
-                    elif normalized.startswith("thua"):
-                        win_loss = "Thua"
+                    if normalized in ("win", "won"):
+                        win_loss_token = "win"
+                    elif normalized in ("loss", "lose", "lost"):
+                        win_loss_token = "loss"
+
+            win_loss_label = None
+            if win_loss_token == "win":
+                win_loss_label = "Tháº¯ng"
+            elif win_loss_token == "loss":
+                win_loss_label = "Thua"
 
             session_id_for_db = None
             if session_id_clean:
@@ -1926,10 +1932,12 @@ CHỈ trả về JSON thuần (không kèm giải thích, không dùng code bloc
                 if not session_id_for_db.startswith("#"):
                     session_id_for_db = f"#{session_id_for_db}"
 
+            bet_amount_for_calc = bet_amount_value if bet_amount_value is not None else 0
+
             multiplier = mobile_betting_service.calculate_multiplier(
                 device_name,
-                win_loss,
-                bet_amount_value or 0
+                win_loss_label,
+                bet_amount_for_calc
             )
 
             mobile_betting_service.save_analysis_history({
@@ -1941,7 +1949,7 @@ CHỈ trả về JSON thuần (không kèm giải thích, không dùng code bloc
                 'bet_amount': bet_amount_value,
                 'actual_bet_amount': bet_amount_value,
                 'bet_status': None,
-                'win_loss': win_loss,
+                'win_loss': win_loss_label,
                 'multiplier': multiplier,
                 'image_path': saved_path,
                 'chatgpt_response': chatgpt_text,
@@ -1950,15 +1958,13 @@ CHỈ trả về JSON thuần (không kèm giải thích, không dùng code bloc
             })
 
             response_data = {
-                "id": session_id_clean or "",
-                "Device name": device_name,
-                "betting_method": betting_method,
-                "image_type": "HISTORY",
-                "bet_amount": bet_amount_display,
-                "win_loss": win_loss
+                'Id': session_id_clean,
+                'device_name': device_name,
+                'betting_method': betting_method,
+                'image_type': 'HISTORY',
+                'bet_amount': bet_amount_value,
+                'win_loss': win_loss_token
             }
-        
-        # XỬ LÝ LOẠI 2: MÀN HÌNH GAME
         elif is_betting:
             seconds_from_ai = parse_numeric_value(parsed_response.get("seconds"))
 
