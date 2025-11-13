@@ -1,0 +1,1263 @@
+﻿from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Form
+from fastapi.responses import HTMLResponse, FileResponse, Response, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional, Dict, Any, Union
+from pathlib import Path
+from datetime import datetime
+import base64
+import io
+import json
+import os
+import re
+import sqlite3
+import unicodedata
+
+import httpx
+from PIL import Image, ImageOps, ImageEnhance
+import pytesseract
+from pytesseract import TesseractNotFoundError
+
+from .services.mobile_betting_service import mobile_betting_service
+
+
+app = FastAPI(title="Run Mobile Service", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def normalize_choice(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = unicodedata.normalize("NFD", str(value))
+    text = ''.join(ch for ch in text if unicodedata.category(ch) != 'Mn')
+    text = text.lower().strip()
+    if text.startswith("tai"):
+        return "tai"
+    if text.startswith("xiu"):
+        return "xiu"
+    return None
+
+
+def win_label_from_token(token: Optional[str]) -> Optional[str]:
+    if token == "win":
+        return "Thắng"
+    if token == "loss":
+        return "Loss"
+    return None
+
+
+def win_token_from_label(label: Optional[str]) -> Optional[str]:
+    if label is None:
+        return None
+    text = unicodedata.normalize("NFD", str(label))
+    text = ''.join(ch for ch in text if unicodedata.category(ch) != 'Mn')
+    text = text.lower().strip()
+    if text.startswith("thang"):
+        return "win"
+    if text.startswith("thua"):
+        return "loss"
+    return None
+
+
+def get_openai_api_key() -> str:
+    key = os.getenv("OPENAI_API_KEY")
+    if key:
+        return key
+
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("OPENAI_API_KEY="):
+                value = line.split("=", 1)[1].strip()
+                if value:
+                    return value
+    raise HTTPException(status_code=500, detail="OPENAI_API_KEY chÆ°a Ä‘Æ°á»£c cáº¥u hÃ¬nh")
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    return RedirectResponse(url="/admin", status_code=307)
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_dashboard():
+    html_path = Path(__file__).with_name("run_mobile_dashboard.html")
+    html_content = html_path.read_text(encoding="utf-8") if html_path.exists() else _build_dashboard_html()
+    html_bytes = html_content.encode('utf-8')
+    return Response(
+        content=html_bytes,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+def _build_dashboard_html() -> str:
+    return """<!DOCTYPE html>
+<html lang=\"vi\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+    <title>Run Mobile Dashboard</title>
+    <style>
+        :root { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1f2933; }
+        body { margin: 0; background: linear-gradient(135deg, #5EE7DF 0%, #B490CA 100%); min-height: 100vh; }
+        .shell { max-width: 1200px; margin: 0 auto; padding: 40px 20px 80px; }
+        header { color: white; text-align: center; margin-bottom: 40px; }
+        header h1 { font-size: 2.5rem; margin: 0 0 12px; }
+        header p { margin: 0; opacity: 0.9; }
+        .card { background: white; border-radius: 16px; box-shadow: 0 18px 40px rgba(31, 41, 51, 0.2); padding: 32px; }
+        .api-card { border-left: 5px solid #ff6b6b; margin-bottom: 32px; }
+        .api-row { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+        code { background: #f1f5f9; padding: 10px 14px; border-radius: 8px; font-size: 0.95rem; }
+        button { cursor: pointer; border: none; border-radius: 8px; padding: 10px 18px; font-weight: 600; transition: transform 0.15s ease, box-shadow 0.15s ease; }
+        button.primary { background: linear-gradient(135deg, #ff6b6b, #f06595); color: white; box-shadow: 0 10px 18px rgba(240, 101, 149, 0.35); }
+        button.secondary { background: #4c51bf; color: white; box-shadow: 0 10px 18px rgba(76, 81, 191, 0.35); }
+        button.small { padding: 6px 12px; font-size: 0.85rem; }
+        button:hover { transform: translateY(-2px); }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 28px; }
+        .stat { background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 18px; border-radius: 14px; text-align: center; }
+        .stat h2 { margin: 0; font-size: 2rem; }
+        .stat p { margin: 6px 0 0; opacity: 0.85; }
+        .toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+        select { padding: 8px 12px; border-radius: 8px; border: 2px solid #e2e8f0; }
+        table { width: 100%; border-collapse: collapse; }
+        thead { background: linear-gradient(135deg, #ff6b6b, #f06595); color: white; }
+        th, td { padding: 14px 16px; text-align: left; font-size: 0.95rem; }
+        tbody tr { background: white; }
+        tbody tr:nth-child(even) { background: #f7fafc; }
+        tbody tr:hover { background: #ffeef3; }
+        .center { text-align: center; }
+        .right { text-align: right; }
+        .tag { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; }
+        .tag.history { background: #E0E7FF; color: #4338CA; }
+        .tag.betting { background: #DCFCE7; color: #166534; }
+        .tag.unknown { background: #FED7AA; color: #9A3412; }
+        .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .muted { color: #94a3b8; font-size: 0.85rem; }
+        .empty { text-align: center; padding: 40px 0; color: #475569; font-style: italic; }
+        .modal { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.55); display: none; align-items: center; justify-content: center; padding: 40px 20px; }
+        .modal-content { background: white; border-radius: 12px; max-width: 960px; width: 100%; max-height: 90vh; display: flex; flex-direction: column; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 24px; border-bottom: 1px solid #e2e8f0; }
+        .modal-body { padding: 20px 24px; overflow: auto; }
+        .close-btn { background: none; color: #64748b; font-size: 1.5rem; padding: 0; }
+        .image-wrapper { position: relative; display: inline-block; max-width: 100%; }
+        #mobile-image-preview { max-width: 100%; border-radius: 10px; }
+        #mobile-image-overlay { position: absolute; inset: 0; pointer-events: none; }
+        .mobile-overlay-box { position: absolute; border: 2px solid rgba(255, 99, 132, 0.85); border-radius: 6px; }
+        .mobile-overlay-label { position: absolute; top: -26px; left: 0; background: rgba(255, 99, 132, 0.9); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; }
+        pre { background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 20px; overflow: auto; }
+        @media (max-width: 768px) {
+            .shell { padding: 24px 16px 60px; }
+            button { width: 100%; }
+            .toolbar { flex-direction: column; align-items: stretch; }
+            .actions { flex-direction: column; }
+        }
+    </style>
+</head>
+<body>
+    <div class=\"shell\">
+        <header>
+            <h1>ðŸ“± Run Mobile Dashboard</h1>
+            <p>Theo dÃµi áº£nh tá»« thiáº¿t bá»‹ mobile vÃ  tráº¡ng thÃ¡i phÃ¢n tÃ­ch tá»± Ä‘á»™ng.</p>
+        </header>
+        <div class=\"card api-card\">
+            <div class=\"api-row\">
+                <strong>POST API:</strong>
+                <code id=\"api-endpoint\">/api/mobile/analyze</code>
+                <button class=\"secondary small\" onclick=\"copyEndpoint()\">ðŸ“‹ Copy</button>
+            </div>
+            <p class=\"muted\">Gá»­i form-data gá»“m <code>file</code>, <code>device_name</code>, <code>betting_method</code> vÃ  cÃ¡c tá»a Ä‘á»™ tÃ¹y chá»n.</p>
+        </div>
+        <div class=\"card\">
+            <div class=\"stats\">
+                <div class=\"stat\">
+                    <h2 id=\"stat-devices\">0</h2>
+                    <p>Devices</p>
+                </div>
+                <div class=\"stat\">
+                    <h2 id=\"stat-entries\">0</h2>
+                    <p>Records</p>
+                </div>
+            </div>
+            <div class=\"toolbar\">
+                <button class=\"primary\" onclick=\"loadHistory()\">ðŸ”„ LÃ m má»›i</button>
+                <label>
+                    Display
+                    <select id=\"history-limit\" onchange=\"loadHistory()\">
+                        <option value=\"10\">10</option>
+                        <option value=\"25\">25</option>
+                        <option value=\"50\" selected>50</option>
+                        <option value=\"100\">100</option>
+                    </select>
+                    latest records
+                </label>
+            </div>
+            <div class=\"table-wrapper\">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Devices</th>
+                            <th>Image Type</th>
+                            <th>Session</th>
+                            <th class=\"center\">Seconds</th>
+                            <th class=\"right\">Tiá»n dá»± kiáº¿n</th>
+                            <th class=\"right\">Tiá»n thá»±c</th>
+                            <th class=\"center\">Result</th>
+                            <th class=\"center\">Há»‡ sá»‘</th>
+                            <th>HÃ nh Ä‘á»™ng</th>
+                            <th>Thá»i gian</th>
+                        </tr>
+                    </thead>
+                    <tbody id=\"history-body\">
+                        <tr><td colspan=\"11\" class=\"empty\">Äang táº£i dá»¯ liá»‡u...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class=\"modal\" id=\"image-modal\">
+        <div class=\"modal-content\">
+            <div class=\"modal-header\">
+                <h3>Run Mobile Image #<span id=\"modal-image-id\"></span></h3>
+                <div class=\"actions\">
+                    <a id=\"download-link\" class=\"secondary small\" href=\"#\" download>â¬‡ï¸ Táº£i áº£nh</a>
+                    <button class=\"close-btn\" onclick=\"closeImageModal()\">&times;</button>
+                </div>
+            </div>
+            <div class=\"modal-body\">
+                <div class=\"image-wrapper\">
+                    <img id=\"modal-image\" src=\"\" alt=\"Screenshot\" />
+                    <div id=\"modal-overlay\"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class=\"modal\" id=\"json-modal\">
+        <div class=\"modal-content\" style=\"max-width: 720px;\">
+            <div class=\"modal-header\">
+                <h3>JSON #<span id=\"modal-json-id\"></span></h3>
+                <div class=\"actions\">
+                    <button class=\"secondary small\" onclick=\"copyJson()\">ðŸ“‹ Copy</button>
+                    <button class=\"close-btn\" onclick=\"closeJsonModal()\">&times;</button>
+                </div>
+            </div>
+            <div class=\"modal-body\">
+                <pre id=\"modal-json-content\"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            loadHistory();
+        });
+
+        async function copyEndpoint() {
+            const endpoint = document.getElementById('api-endpoint').textContent;
+            await navigator.clipboard.writeText(window.location.origin + endpoint);
+            alert('ÄÃ£ copy endpoint!');
+        }
+
+        async function loadHistory() {
+            const limit = document.getElementById('history-limit').value;
+            const tbody = document.getElementById('history-body');
+            tbody.innerHTML = '<tr><td colspan="11" class="empty">Äang táº£i dá»¯ liá»‡u...</td></tr>';
+            try {
+                const resp = await fetch(`/api/mobile/history?limit=${limit}`);
+                const data = await resp.json();
+                if (!resp.ok || !data.success) {
+                    throw new Error(data.detail || 'KhÃ´ng thá»ƒ táº£i dá»¯ liá»‡u');
+                }
+
+                document.getElementById('stat-entries').textContent = data.total;
+                const uniqueDevices = Array.from(new Set(data.history.map(item => item.device_name))).filter(Boolean);
+                document.getElementById('stat-devices').textContent = uniqueDevices.length;
+
+                if (data.history.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="11" class="empty">No data available</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = '';
+                data.history.forEach(record => {
+                    const tr = document.createElement('tr');
+
+                    const tagClass = record.image_type === 'HISTORY' ? 'history' : (record.image_type === 'BETTING' ? 'betting' : 'unknown');
+                    const tagLabel = record.image_type || 'UNKNOWN';
+
+                    const planned = record.bet_amount ?? '-';
+                    const actual = record.actual_bet_amount ?? '-';
+                    const winLoss = record.win_loss || '-';
+                    const multiplier = record.multiplier ?? '-';
+                    const seconds = record.seconds_remaining ?? '-';
+                    const session = record.session_id || '-';
+                    const createdAt = record.created_at ? new Date(record.created_at).toLocaleString('en-US') : '-';
+
+                    tr.innerHTML = `
+                        <td>#${record.id}</td>
+                        <td>${record.device_name || '-'}</td>
+                        <td><span class="tag ${tagClass}">${tagLabel}</span></td>
+                        <td>${session}</td>
+                        <td class="center">${seconds}</td>
+                        <td class="right">${formatNumber(planned)}</td>
+                        <td class="right">${formatNumber(actual)}</td>
+                        <td class="center">${winLoss}</td>
+                        <td class="center">${multiplier}</td>
+                        <td class="actions">
+                            ${record.image_path ? `<button class="secondary small" data-id="${record.id}" data-seconds="${record.seconds_region_coords || ''}" data-bet="${record.bet_region_coords || ''}" onclick="openImageModal(this)">ðŸ–¼ï¸ áº¢nh</button>` : ''}
+                            <button class="primary small" onclick="openJsonModal(${record.id})">JSON</button>
+                        </td>
+                        <td>${createdAt}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (error) {
+                console.error(error);
+                tbody.innerHTML = `<tr><td colspan="11" class="empty">${error.message}</td></tr>`;
+            }
+        }
+
+        function formatNumber(value) {
+            if (value === null || value === undefined || value === '-') return '-';
+            const number = Number(value);
+            if (Number.isNaN(number)) return '-';
+            return number.toLocaleString('en-US');
+        }
+
+        function openImageModal(button) {
+            const recordId = button.dataset.id;
+            const seconds = button.dataset.seconds || '';
+            const bet = button.dataset.bet || '';
+            const timestamp = Date.now();
+
+            const image = document.getElementById('modal-image');
+            const overlay = document.getElementById('modal-overlay');
+            const download = document.getElementById('download-link');
+
+            image.src = `/api/mobile/history/image/${recordId}?_=${timestamp}`;
+            download.href = `/api/mobile/history/image/${recordId}?download=1&_=${timestamp}`;
+            download.setAttribute('download', `mobile-${recordId}.jpg`);
+            document.getElementById('modal-image-id').textContent = recordId;
+            overlay.innerHTML = '';
+            overlay.dataset.seconds = seconds;
+            overlay.dataset.bet = bet;
+
+            image.onload = () => renderOverlay();
+            document.getElementById('image-modal').style.display = 'flex';
+        }
+
+        function closeImageModal() {
+            const modal = document.getElementById('image-modal');
+            const image = document.getElementById('modal-image');
+            const overlay = document.getElementById('modal-overlay');
+            modal.style.display = 'none';
+            image.src = '';
+            overlay.innerHTML = '';
+        }
+
+        function parseRegions(raw) {
+            if (!raw) return [];
+            return raw.split('|').map(part => {
+                const trimmed = part.trim();
+                if (!trimmed) return null;
+                const [start, end] = trimmed.split(';');
+                if (!start || !end) return null;
+                const [x1, y1] = start.split(':').map(Number);
+                const [x2, y2] = end.split(':').map(Number);
+                if ([x1, y1, x2, y2].some(v => Number.isNaN(v))) return null;
+                const left = Math.min(x1, x2);
+                const right = Math.max(x1, x2);
+                const top = Math.min(y1, y2);
+                const bottom = Math.max(y1, y2);
+                if (right - left < 2 || bottom - top < 2) return null;
+                return { left, right, top, bottom };
+            }).filter(Boolean);
+        }
+
+        function renderOverlay() {
+            const overlay = document.getElementById('modal-overlay');
+            const image = document.getElementById('modal-image');
+            overlay.innerHTML = '';
+            const secondsRegions = parseRegions(overlay.dataset.seconds || '');
+            const betRegions = parseRegions(overlay.dataset.bet || '');
+
+            const naturalWidth = image.naturalWidth || 1;
+            const naturalHeight = image.naturalHeight || 1;
+            const scaleX = (image.clientWidth || naturalWidth) / naturalWidth;
+            const scaleY = (image.clientHeight || naturalHeight) / naturalHeight;
+
+            const addBox = (region, label) => {
+                const box = document.createElement('div');
+                box.className = 'mobile-overlay-box';
+                box.style.left = `${region.left * scaleX}px`;
+                box.style.top = `${region.top * scaleY}px`;
+                box.style.width = `${(region.right - region.left) * scaleX}px`;
+                box.style.height = `${(region.bottom - region.top) * scaleY}px`;
+                if (label) {
+                    const badge = document.createElement('div');
+                    badge.className = 'mobile-overlay-label';
+                    badge.textContent = label;
+                    box.appendChild(badge);
+                }
+                overlay.appendChild(box);
+            };
+
+            if (secondsRegions.length > 0) addBox(secondsRegions[0], 'Seconds');
+            if (betRegions.length > 0) {
+                addBox(betRegions[0], 'Sáº½ cÆ°á»£c');
+                if (betRegions.length > 1) addBox(betRegions[1], 'ÄÃ£ cÆ°á»£c');
+            }
+        }
+
+        async function openJsonModal(id) {
+            const modal = document.getElementById('json-modal');
+            const content = document.getElementById('modal-json-content');
+            content.textContent = 'Äang táº£i...';
+            modal.style.display = 'flex';
+            document.getElementById('modal-json-id').textContent = id;
+
+            try {
+                const resp = await fetch(`/api/mobile/history/json/${id}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.detail || 'KhÃ´ng thá»ƒ táº£i JSON');
+                }
+                const data = await resp.json();
+                content.textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                content.textContent = error.message;
+            }
+        }
+
+        function copyJson() {
+            const content = document.getElementById('modal-json-content').textContent;
+            navigator.clipboard.writeText(content).then(() => alert('ÄÃ£ copy JSON!'));
+        }
+
+        function closeJsonModal() {
+            document.getElementById('json-modal').style.display = 'none';
+        }
+
+        window.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                closeImageModal();
+                closeJsonModal();
+            }
+        });
+    </script>
+</body>
+</html>
+"""
+
+
+@app.post("/api/mobile/analyze")
+async def mobile_analyze(
+    file: UploadFile = File(...),
+    device_name: str = Form(...),
+    betting_method: str = Form(...),
+    seconds_region_coords: Optional[str] = Form(None),
+    bet_amount_region_coords: Optional[str] = Form(None),
+    screenshot_width: Optional[int] = Form(None),
+    screenshot_height: Optional[int] = Form(None),
+    simulator_width: Optional[int] = Form(None),
+    simulator_height: Optional[int] = Form(None),
+):
+    """Nháº­n áº£nh tá»« mobile vÃ  phÃ¢n tÃ­ch."""
+    try:
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+        actual_image_width = image.width
+        actual_image_height = image.height
+
+        scale_x = 1.0
+        scale_y = 1.0
+        needs_scaling = False
+
+        if simulator_width and simulator_height and screenshot_width and screenshot_height:
+            scale_x = actual_image_width / simulator_width if simulator_width > 0 else 1.0
+            scale_y = actual_image_height / simulator_height if simulator_height > 0 else 1.0
+            needs_scaling = True
+        elif screenshot_width and screenshot_height:
+            scale_x = actual_image_width / screenshot_width if screenshot_width > 0 else 1.0
+            scale_y = actual_image_height / screenshot_height if screenshot_height > 0 else 1.0
+            needs_scaling = True
+
+        mobile_dir = "mobile_images/run_mobile"
+        os.makedirs(mobile_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_extension = image.format.lower() if image.format else "jpg"
+        if file_extension not in {"jpg", "jpeg", "png"}:
+            file_extension = "jpg"
+        saved_filename = f"mobile_{device_name}_{timestamp}.{file_extension}"
+        saved_path = os.path.join(mobile_dir, saved_filename)
+        image.save(saved_path, quality=95)
+
+        def parse_region_coords(coord_str: Optional[str]):
+            if not coord_str or not coord_str.strip():
+                return None
+            try:
+                parts = coord_str.strip().split(';')
+                if len(parts) != 2:
+                    return None
+                x1_str, y1_str = parts[0].split(':')
+                x2_str, y2_str = parts[1].split(':')
+                x1_raw, y1_raw = float(x1_str), float(y1_str)
+                x2_raw, y2_raw = float(x2_str), float(y2_str)
+
+                if needs_scaling:
+                    x1 = int(x1_raw * scale_x)
+                    y1 = int(y1_raw * scale_y)
+                    x2 = int(x2_raw * scale_x)
+                    y2 = int(y2_raw * scale_y)
+                else:
+                    x1, y1 = int(x1_raw), int(y1_raw)
+                    x2, y2 = int(x2_raw), int(y2_raw)
+
+                left, right = sorted([x1, x2])
+                top, bottom = sorted([y1, y2])
+                left = max(0, min(left, image.width))
+                right = max(0, min(right, image.width))
+                top = max(0, min(top, image.height))
+                bottom = max(0, min(bottom, image.height))
+                if right - left < 2 or bottom - top < 2:
+                    return None
+                return (left, top, right, bottom)
+            except Exception:
+                return None
+
+        def parse_numeric_value(value: Optional[Union[str, int, float]]) -> Optional[int]:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return int(value)
+            text = str(value).strip()
+            if not text:
+                return None
+            digits = ''.join(ch for ch in text if ch.isdigit())
+            if not digits:
+                return None
+            try:
+                return int(digits)
+            except ValueError:
+                return None
+
+        def parse_json_payload(raw_text: str) -> Dict[str, Any]:
+            if not raw_text:
+                return {}
+            cleaned = raw_text.strip()
+            start = cleaned.find('{')
+            end = cleaned.rfind('}')
+            if start != -1 and end != -1 and end >= start:
+                cleaned = cleaned[start : end + 1]
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                return {}
+            except Exception:
+                return {}
+
+        
+
+        def extract_number_from_region(base_image: Image.Image, coords: Optional[tuple]) -> int:
+            if not coords:
+                return 0
+            region = base_image.crop(coords)
+            region = region.resize(
+                (
+                    max(1, region.width * 2),
+                    max(1, region.height * 2),
+                ),
+                Image.LANCZOS,
+            )
+            gray = ImageOps.grayscale(region)
+            gray = ImageOps.autocontrast(gray)
+            gray = ImageEnhance.Contrast(gray).enhance(2.0)
+            try:
+                text = pytesseract.image_to_string(
+                    gray, config='--psm 7 -c tessedit_char_whitelist=0123456789'
+                )
+            except TesseractNotFoundError:
+                return 0
+            except Exception:
+                return 0
+
+            digits = re.sub(r'[^0-9]', '', text or '')
+            if not digits:
+                return 0
+            try:
+                return int(digits)
+            except ValueError:
+                return 0
+
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        openai_api_key = get_openai_api_key()
+
+        detection_prompt = """Phan tich anh giao dien game va tra ve dung mot JSON theo quy tac sau:
+
+1. Neu anh la popup lich su cuoc (co tieu de "LICH SU"):
+   - Chi doc DONG DAU TIEN cua bang (phien moi nhat nam tren cung).
+   - Doc phan "Chi tiet" cua dong nay (vi du: "Dat Tai. Ket qua: Tai. Tong dat 1,000. Hoan tra 0.").
+   - Lay so trong cum "Tong dat ..." (bo dau phan cach nghin) va gan vao khoa "bet_amount" duoi dang so nguyen.
+   - Doc gia tri sau "Ket qua:" (vi du: "Tai" hoac "Xiu") va gan vao khoa "result" voi gia tri 'Tai' hoac 'Xiu'.
+   - So sanh gia tri sau "Dat" va sau "Ket qua":
+       * Neu giong nhau -> "win_loss" = "win".
+       * Neu khac nhau -> "win_loss" = "loss".
+       * Neu phan "Ket qua" thieu hoac hien thi trang thai cho -> "win_loss" = null.
+   - Lay so phien o cot "Phien" cua dong nay lam gia tri cho khoa "Id" (bo ky tu "#" neu co).
+   - Tra ve dung JSON: {"image_type":"HISTORY","Id":"<ma phien>","result":"Tai|Xiu","bet_amount":<so tien>}.
+
+2. Neu anh la man hinh dang cuoc:
+   - Chi lay SO GIAY o dong ho dem nguoc giua man hinh.
+   - Tra ve JSON: {"image_type":"GAME","seconds":<so giay>}.
+
+3. Neu khong xac dinh duoc loai anh, tra ve {"image_type":"UNKNOWN"}.
+
+CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": detection_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                        "detail": "low",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 300,
+                },
+            )
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Lá»—i ChatGPT: {response.text}",
+                )
+
+            result = response.json()
+            chatgpt_text = result["choices"][0]["message"]["content"]
+
+        parsed_response = parse_json_payload(chatgpt_text)
+        image_type_hint = str(parsed_response.get("image_type") or "").upper()
+        if not image_type_hint:
+            if "TYPE: HISTORY" in chatgpt_text:
+                image_type_hint = "HISTORY"
+            elif "TYPE: GAME" in chatgpt_text or "TYPE: BETTING" in chatgpt_text:
+                image_type_hint = "GAME"
+        is_history = image_type_hint == "HISTORY"
+        is_betting = image_type_hint in {"GAME", "BETTING"}
+
+        base_response_data = {
+            "device_name": device_name,
+            "betting_method": betting_method,
+            "planned_bet_amount": None,
+            "placed_bet_amount": None,
+            "regions": {
+                "seconds": seconds_region_coords,
+                "bet_amount": bet_amount_region_coords,
+            },
+            "image_dimensions": {
+                "actual_width": actual_image_width,
+                "actual_height": actual_image_height,
+                "screenshot_width": screenshot_width,
+                "screenshot_height": screenshot_height,
+                "simulator_width": simulator_width,
+                "simulator_height": simulator_height,
+            },
+            "scaling": {
+                "applied": needs_scaling,
+                "scale_x": scale_x,
+                "scale_y": scale_y,
+            },
+        }
+        response_data: Optional[Dict[str, Any]] = None
+
+        if is_history:
+            session_id_raw = (
+                parsed_response.get("Id")
+                or parsed_response.get("id")
+                or parsed_response.get("session_id")
+            )
+            session_id_clean = None
+            if session_id_raw is not None:
+                session_id_clean = str(session_id_raw).strip().lstrip("#") or None
+
+            if not session_id_clean:
+                session_match = re.search(r'"(?:Id|id)"\s*:\s*"?(#?\d+)"?', chatgpt_text)
+                if session_match:
+                    session_id_clean = session_match.group(1).lstrip("#")
+
+            bet_amount_raw = parsed_response.get("bet_amount")
+            bet_amount_value = parse_numeric_value(bet_amount_raw)
+            if bet_amount_value is None:
+                amount_match = re.search(r'"bet_amount"\s*:\s*"?([0-9.,]+)"?', chatgpt_text)
+                if amount_match:
+                    bet_amount_value = parse_numeric_value(amount_match.group(1))
+
+            result_value = parsed_response.get("result") or parsed_response.get("Result")
+            if not result_value:
+                detail_match = re.search(r'Đặt\s+([A-Za-zÀ-ỹ]+).*?Kết\s+quả:\s*([A-Za-zÀ-ỹ]+)', chatgpt_text, re.IGNORECASE | re.DOTALL)
+                if detail_match:
+                    result_value = detail_match.group(2)
+
+            bet_choice_norm = normalize_choice(betting_method)
+            result_choice_norm = normalize_choice(result_value)
+
+            if bet_choice_norm and result_choice_norm:
+                win_loss_token = "win" if bet_choice_norm == result_choice_norm else "loss"
+            else:
+                win_loss_token = None
+
+            win_loss_label = win_label_from_token(win_loss_token)
+
+            session_id_for_db = None
+            if session_id_clean:
+                session_id_for_db = session_id_clean
+                if not session_id_for_db.startswith("#"):
+                    session_id_for_db = f"#{session_id_for_db}"
+
+            bet_amount_for_calc = bet_amount_value if bet_amount_value is not None else 0
+
+            multiplier = mobile_betting_service.calculate_multiplier(
+                device_name,
+                win_loss_label,
+                bet_amount_for_calc,
+            )
+
+            mobile_betting_service.save_analysis_history(
+                {
+                    "device_name": device_name,
+                    "betting_method": betting_method,
+                    "session_id": session_id_for_db,
+                    "image_type": "HISTORY",
+                    "seconds_remaining": None,
+                    "bet_amount": bet_amount_value,
+                    "actual_bet_amount": bet_amount_value,
+                    "bet_status": None,
+                    "win_loss": win_loss_label,
+                    "multiplier": multiplier,
+                    "image_path": saved_path,
+                    "chatgpt_response": chatgpt_text,
+                    "seconds_region_coords": seconds_region_coords,
+                    "bet_region_coords": bet_amount_region_coords,
+                }
+            )
+
+            response_data = {
+                "Id": session_id_clean,
+                "device_name": device_name,
+                "betting_method": betting_method,
+                "image_type": "HISTORY",
+                "bet_amount": bet_amount_value,
+                "win_loss": win_loss_token,
+            }
+
+        elif is_betting:
+            seconds_from_ai = parse_numeric_value(parsed_response.get("seconds"))
+            seconds_from_region = None
+            seconds_coords = parse_region_coords(seconds_region_coords)
+            if seconds_coords:
+                seconds_from_region = extract_number_from_region(image, seconds_coords)
+
+            seconds_value = (
+                seconds_from_ai
+                if seconds_from_ai is not None
+                else (seconds_from_region if seconds_from_region is not None else 0)
+            )
+
+            mobile_betting_service.save_analysis_history(
+                {
+                    "device_name": device_name,
+                    "betting_method": betting_method,
+                    "session_id": None,
+                    "image_type": "BETTING",
+                    "seconds_remaining": seconds_value,
+                    "bet_amount": 0,
+                    "actual_bet_amount": 0,
+                    "bet_status": None,
+                    "win_loss": None,
+                    "multiplier": None,
+                    "image_path": saved_path,
+                    "chatgpt_response": chatgpt_text,
+                    "seconds_region_coords": seconds_region_coords,
+                    "bet_region_coords": bet_amount_region_coords,
+                }
+            )
+
+            response_data = {
+                "id": "",
+                "Device name": device_name,
+                "betting_method": betting_method,
+                "image_type": "BETTING",
+                "seconds": seconds_value,
+            }
+
+        else:
+            response_data = base_response_data.copy()
+            mobile_betting_service.save_analysis_history(
+                {
+                    "device_name": device_name,
+                    "betting_method": betting_method,
+                    "session_id": None,
+                    "image_type": "UNKNOWN",
+                    "seconds_remaining": None,
+                    "bet_amount": 0,
+                    "actual_bet_amount": None,
+                    "bet_status": None,
+                    "win_loss": None,
+                    "multiplier": None,
+                    "image_path": saved_path,
+                    "chatgpt_response": chatgpt_text,
+                    "seconds_region_coords": seconds_region_coords,
+                    "bet_region_coords": bet_amount_region_coords,
+                }
+            )
+
+            response_data.update(
+                {
+                    "image_type": "UNKNOWN",
+                    "multiplier": 0,
+                    "note": "áº¢nh khÃ´ng pháº£i lÃ  popup lá»‹ch sá»­ cÆ°á»£c hoáº·c mÃ n hÃ¬nh Ä‘ang cÆ°á»£c",
+                }
+            )
+
+        return response_data
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+
+        print("[Mobile Analyze Error]", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Lá»—i phÃ¢n tÃ­ch mobile: {exc}")
+
+
+@app.get("/api/mobile/history")
+async def get_mobile_history(limit: int = 50):
+    try:
+        history = mobile_betting_service.get_analysis_history(limit=limit)
+        return {"success": True, "total": len(history), "history": history}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lá»—i láº¥y lá»‹ch sá»­: {exc}")
+
+
+@app.get("/api/mobile/history/image/{record_id}")
+async def get_mobile_history_image(record_id: int, download: bool = Query(False)):
+    try:
+        conn = sqlite3.connect("logs.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT image_path
+            FROM mobile_analysis_history
+            WHERE id = ?
+            """,
+            (record_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y áº£nh")
+
+        image_path = row[0]
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail=f"File áº£nh khÃ´ng tá»“n táº¡i: {image_path}")
+
+        extension = os.path.splitext(image_path)[1].lower()
+        media_type = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(extension, "image/jpeg")
+
+        filename = os.path.basename(image_path) if download else None
+        return FileResponse(image_path, media_type=media_type, filename=filename)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lá»—i láº¥y áº£nh: {exc}")
+
+
+@app.get("/api/mobile/history/json/{record_id}")
+async def download_mobile_history_json(record_id: int):
+    try:
+        conn = sqlite3.connect("logs.db")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM mobile_analysis_history WHERE id = ?",
+            (record_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y dá»¯ liá»‡u")
+
+        record = dict(row)
+        base_payload: Dict[str, Any] = {
+            "id": record.get("id"),
+            "device_name": record.get("device_name"),
+            "betting_method": record.get("betting_method"),
+            "image_type": record.get("image_type"),
+        }
+
+        image_type = record.get("image_type")
+
+        if image_type == "BETTING":
+            payload: Dict[str, Any] = {
+                **base_payload,
+                "seconds": record.get("seconds_remaining"),
+            }
+        elif image_type == "HISTORY":
+            payload = {
+                **base_payload,
+                "bet_amount": record.get("bet_amount"),
+                "win_loss": win_token_from_label(record.get("win_loss")),
+            }
+        else:
+            payload = base_payload
+
+        filtered_payload = {k: v for k, v in payload.items() if v is not None}
+
+        return filtered_payload
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lá»—i táº£i JSON: {exc}")
+
+
+@app.get("/api/mobile/device-state/{device_name}")
+async def get_device_state(device_name: str):
+    try:
+        state = mobile_betting_service.get_device_state(device_name)
+        return {"success": True, "state": state}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lá»—i láº¥y state: {exc}")
+
+
+@app.get("/api/mobile/result/{device_name}")
+async def get_mobile_result(device_name: str):
+    try:
+        conn = sqlite3.connect("logs.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT device_name, betting_method, session_id, image_type,
+                   seconds_remaining, bet_amount, bet_status, win_loss, multiplier,
+                   created_at
+            FROM mobile_analysis_history
+            WHERE device_name = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (device_name,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return {"success": False, "message": f"KhÃ´ng tÃ¬m tháº¥y káº¿t quáº£ cho device {device_name}"}
+
+        response_data: Dict[str, Any] = {
+            "success": True,
+            "device_name": row[0],
+            "betting_method": row[1],
+            "image_type": row[3],
+        }
+
+        if row[3] == "HISTORY":
+            response_data.update(
+                {
+                    "session_id": row[2],
+                    "session_time": row[9],
+                    "bet_amount": row[5],
+                    "win_loss": row[7],
+                    "multiplier": row[8],
+                }
+            )
+        elif row[3] == "BETTING":
+            response_data.update(
+                {
+                    "session_id": row[2],
+                    "seconds": row[4],
+                    "bet_amount": row[5],
+                    "bet_status": row[6],
+                }
+            )
+
+        return response_data
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lá»—i láº¥y káº¿t quáº£: {exc}")
+
+
+@app.post("/api/mobile/verify-quick")
+async def verify_quick(
+    file: UploadFile = File(...),
+    device_name: str = Form(...),
+    expected_amount: int = Form(...),
+):
+    try:
+        image_data = await file.read()
+        mobile_dir = "mobile_images/verify_quick"
+        os.makedirs(mobile_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        saved_path = os.path.join(mobile_dir, f"verify_{device_name}_{timestamp}.jpg")
+        with open(saved_path, "wb") as f:
+            f.write(image_data)
+
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        openai_api_key = get_openai_api_key()
+
+        prompt = """ÄÃ¢y lÃ  giao diá»‡n game. Äá»c sá»‘ lÆ°á»£ng hiá»ƒn thá»‹:\n\nTÃ¬m sá»‘ mÃ u TRáº®NG náº±m DÆ¯á»šI chá»¯ TÃ€I hoáº·c Xá»ˆU (khÃ´ng pháº£i sá»‘ trong khung).\n\nTráº£ vá» CHá»ˆ 1 dÃ²ng:\nSá»‘ lÆ°á»£ng: [sá»‘]\n\nVÃ­ dá»¥: \nSá»‘ lÆ°á»£ng: 2000\nhoáº·c\nSá»‘ lÆ°á»£ng: 0"""
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                        "detail": "low",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 100,
+                },
+            )
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Lá»—i ChatGPT: {response.text}",
+                )
+
+            result = response.json()
+            chatgpt_text = result["choices"][0]["message"]["content"]
+
+        money_match = re.search(r'(?:Tiá»n cÆ°á»£c|Sá»‘ lÆ°á»£ng):\s*([\d,]+)', chatgpt_text)
+        detected_amount = int(money_match.group(1).replace(',', '')) if money_match else 0
+
+        amount_match = detected_amount == expected_amount
+        confidence = 1.0 if amount_match else 0.3
+        needs_popup = confidence < 0.85
+
+        mobile_betting_service.save_verification_log(
+            {
+                "device_name": device_name,
+                "session_id": None,
+                "verification_type": "quick",
+                "expected_amount": expected_amount,
+                "detected_amount": detected_amount,
+                "confidence": confidence,
+                "match_status": amount_match,
+                "screenshot_path": saved_path,
+                "chatgpt_response": chatgpt_text,
+            }
+        )
+
+        return {
+            "verified": amount_match,
+            "confidence": confidence,
+            "detected_amount": detected_amount,
+            "expected_amount": expected_amount,
+            "needs_popup_verify": needs_popup,
+            "screenshot_path": saved_path,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+
+        print("[Verify Quick Error]", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Lá»—i verify quick: {exc}")
+
+
+@app.post("/api/mobile/verify-popup")
+async def verify_popup(
+    file: UploadFile = File(...),
+    device_name: str = Form(...),
+    expected_amount: int = Form(...),
+    expected_method: str = Form(...),
+    current_session: str = Form(default=""),
+):
+    try:
+        image_data = await file.read()
+        mobile_dir = "mobile_images/verify_popup"
+        os.makedirs(mobile_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        saved_path = os.path.join(mobile_dir, f"popup_{device_name}_{timestamp}.jpg")
+        with open(saved_path, "wb") as f:
+            f.write(image_data)
+
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        openai_api_key = get_openai_api_key()
+
+        prompt = """ÄÃ¢y lÃ  popup lá»‹ch sá»­ trong game. Äá»c CHá»ˆ dÃ²ng Äáº¦U TIÃŠN (má»›i nháº¥t):\n\nFormat tráº£ vá»:\nSession: #[sá»‘]\nSá»‘ lÆ°á»£ng: [sá»‘]\nResult: [+sá»‘ / -sá»‘ / -]\nChi tiáº¿t: [text]\n\nLÆ°u Ã½: Náº¿u \"Result\" chá»‰ lÃ  dáº¥u gáº¡ch \"-\" nghÄ©a lÃ  Ä‘ang chá»."""
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                        "detail": "low",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 200,
+                },
+            )
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Lá»—i ChatGPT: {response.text}",
+                )
+
+            result = response.json()
+            chatgpt_text = result["choices"][0]["message"]["content"]
+
+        session_match = re.search(r'Session:\s*#?(\d+)', chatgpt_text)
+        amount_match = re.search(r'(?:Tá»•ng cÆ°á»£c|Sá»‘ lÆ°á»£ng):\s*([\d,]+)', chatgpt_text)
+        win_loss_match = re.search(r'(?:Tiá»n tháº¯ng|Result):\s*([+\-]?\d+|[\-])', chatgpt_text)
+        detail_match = re.search(r'Chi tiáº¿t:\s*(.+)', chatgpt_text)
+
+        detected_session = f"#{session_match.group(1)}" if session_match else None
+        detected_amount = int(amount_match.group(1).replace(',', '')) if amount_match else 0
+        detected_win_loss = win_loss_match.group(1) if win_loss_match else None
+        detected_detail = detail_match.group(1) if detail_match else ""
+
+        detected_method = None
+        if "TÃ i" in detected_detail:
+            detected_method = "TÃ i"
+        elif "Xá»‰u" in detected_detail:
+            detected_method = "Xá»‰u"
+
+        checks = []
+        amount_ok = detected_amount == expected_amount
+        checks.append(("amount_match", amount_ok))
+
+        method_ok = (detected_method == expected_method) if detected_method else None
+        if method_ok is not None:
+            checks.append(("method_match", method_ok))
+
+        pending_ok = detected_win_loss == "-"
+        checks.append(("pending_status", pending_ok))
+
+        passed = sum(1 for _, ok in checks if ok)
+        total = len(checks)
+        confidence = passed / total if total > 0 else 0.0
+        verified = confidence >= 0.8
+
+        mobile_betting_service.save_verification_log(
+            {
+                "device_name": device_name,
+                "session_id": detected_session,
+                "verification_type": "popup",
+                "expected_amount": expected_amount,
+                "detected_amount": detected_amount,
+                "confidence": confidence,
+                "match_status": verified,
+                "screenshot_path": saved_path,
+                "chatgpt_response": chatgpt_text,
+            }
+        )
+
+        if not amount_ok and detected_amount > 0:
+            mobile_betting_service.handle_mismatch(
+                device_name,
+                expected_amount,
+                detected_amount,
+                detected_session,
+            )
+
+        return {
+            "verified": verified,
+            "confidence": confidence,
+            "session_match": True,
+            "amount_match": amount_ok,
+            "method_match": method_ok if method_ok is not None else True,
+            "status": "pending_result" if pending_ok else "unknown",
+            "detected_session": detected_session,
+            "detected_amount": detected_amount,
+            "detected_method": detected_method,
+            "mismatch_details": None if amount_ok else f"Expected {expected_amount}, got {detected_amount}",
+            "screenshot_path": saved_path,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+
+        print("[Verify Popup Error]", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Lá»—i verify popup: {exc}")

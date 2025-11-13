@@ -502,6 +502,99 @@ class MobileBettingService:
             'expected': expected_amount,
             'actual': actual_amount
         }
+    
+    def get_latest_valid_history_record(self, device_name: str) -> Optional[Dict]:
+        """
+        Lấy record HISTORY gần nhất của device có tien_thang != 0 và winnings_color != null
+        
+        Returns:
+            Dict với các giá trị: tien_thang, winnings_color, winnings_amount, win_loss, column_5, bet_amount
+            hoặc None nếu không tìm thấy
+        """
+        import re
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Query các record HISTORY của device này, sắp xếp theo thời gian giảm dần
+        cursor.execute("""
+            SELECT id, chatgpt_response, bet_amount, win_loss, created_at
+            FROM mobile_analysis_history
+            WHERE device_name = ? AND image_type = 'HISTORY'
+            ORDER BY created_at DESC
+            LIMIT 50
+        """, (device_name,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # Parse từ chatgpt_response để tìm record có tien_thang != 0 và winnings_color != null
+        for row in rows:
+            record_id, chatgpt_response, bet_amount, win_loss, created_at = row
+            
+            if not chatgpt_response:
+                continue
+            
+            # Parse JSON từ chatgpt_response
+            try:
+                import json as json_lib
+                # Tìm JSON object trong chatgpt_response (tương tự parse_json_payload)
+                cleaned = chatgpt_response.strip()
+                start = cleaned.find('{')
+                end = cleaned.rfind('}')
+                if start != -1 and end != -1 and end >= start:
+                    cleaned = cleaned[start : end + 1]
+                    parsed = json_lib.loads(cleaned)
+                    
+                    winnings_amount = parsed.get("winnings_amount")
+                    winnings_color = parsed.get("winnings_color")
+                    column_5 = parsed.get("column_5")
+                    
+                    # Kiểm tra điều kiện: tien_thang != 0 và winnings_color != null
+                    if winnings_amount is not None and winnings_amount != 0 and winnings_color is not None:
+                        return {
+                            'tien_thang': winnings_amount,
+                            'winnings_amount': winnings_amount,
+                            'winnings_color': winnings_color,
+                            'win_loss': win_loss,
+                            'column_5': column_5,
+                            'bet_amount': bet_amount,
+                            'record_id': record_id
+                        }
+            except Exception:
+                # Nếu parse JSON thất bại, thử parse bằng regex
+                try:
+                    # Tìm winnings_amount
+                    winnings_match = re.search(r'"winnings_amount"\s*:\s*(-?\d+|null)', chatgpt_response)
+                    winnings_amount = None
+                    if winnings_match:
+                        winnings_str = winnings_match.group(1)
+                        if winnings_str != "null":
+                            winnings_amount = int(winnings_str)
+                    
+                    # Tìm winnings_color
+                    color_match = re.search(r'"winnings_color"\s*:\s*"?(red|green)"?', chatgpt_response, re.IGNORECASE)
+                    winnings_color = color_match.group(1).lower() if color_match else None
+                    
+                    # Tìm column_5
+                    column5_match = re.search(r'"column_5"\s*:\s*"([^"]*)"', chatgpt_response)
+                    column_5 = column5_match.group(1) if column5_match else None
+                    
+                    # Kiểm tra điều kiện
+                    if winnings_amount is not None and winnings_amount != 0 and winnings_color is not None:
+                        return {
+                            'tien_thang': winnings_amount,
+                            'winnings_amount': winnings_amount,
+                            'winnings_color': winnings_color,
+                            'win_loss': win_loss,
+                            'column_5': column_5,
+                            'bet_amount': bet_amount,
+                            'record_id': record_id
+                        }
+                except Exception:
+                    continue
+        
+        return None
 
 # Singleton instance
 mobile_betting_service = MobileBettingService()

@@ -164,11 +164,68 @@ def _build_dashboard_html() -> str:
         .mobile-overlay-box { position: absolute; border: 2px solid rgba(255, 99, 132, 0.85); border-radius: 6px; }
         .mobile-overlay-label { position: absolute; top: -26px; left: 0; background: rgba(255, 99, 132, 0.9); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; }
         pre { background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 20px; overflow: auto; }
+        .drop-zones-container {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-top: 20px;
+        }
+        .drop-zone {
+            border: 2px dashed #cbd5e1;
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+            background: #f8fafc;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            min-height: 200px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .drop-zone:hover {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+        .drop-zone.dragover {
+            border-color: #667eea;
+            background: #e0e7ff;
+            border-style: solid;
+        }
+        .drop-zone-label {
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 8px;
+            font-size: 0.95rem;
+        }
+        .drop-zone-preview {
+            max-width: 100%;
+            max-height: 150px;
+            border-radius: 8px;
+            margin-top: 8px;
+            display: none;
+        }
+        .drop-zone-preview.show {
+            display: block;
+        }
+        .drop-zone-placeholder {
+            color: #94a3b8;
+            font-size: 0.85rem;
+            margin-top: 8px;
+        }
+        .drop-zone-status {
+            margin-top: 8px;
+            font-size: 0.8rem;
+        }
         @media (max-width: 768px) {
             .shell { padding: 24px 16px 60px; }
             button { width: 100%; }
             .toolbar { flex-direction: column; align-items: stretch; }
             .actions { flex-direction: column; }
+            .drop-zones-container {
+                grid-template-columns: repeat(2, 1fr);
+            }
         }
     </style>
 </head>
@@ -205,6 +262,56 @@ def _build_dashboard_html() -> str:
                 <div id=\"history-sample-status\" style=\"flex: 1; min-width: 200px;\"></div>
             </div>
             <div id=\"history-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
+        </div>
+        <div class=\"card\" style=\"border-left: 5px solid #f59e0b;\">
+            <h3 style=\"margin-top: 0;\">🖼️ Ảnh Mẫu (Drag & Drop)</h3>
+            <p class=\"muted\">Kéo thả ảnh vào các vùng bên dưới để upload ảnh mẫu. Ảnh sẽ tự động lưu khi drop.</p>
+            <div class=\"drop-zones-container\">
+                <div class=\"drop-zone\" id=\"drop-zone-1k\" 
+                     ondragover=\"event.preventDefault(); this.classList.add('dragover');\" 
+                     ondragleave=\"this.classList.remove('dragover');\" 
+                     ondrop=\"handleDrop(event, '1k')\"
+                     onclick=\"document.getElementById('file-input-1k').click()\">
+                    <div class=\"drop-zone-label\">💰 Ảnh 1K</div>
+                    <img class=\"drop-zone-preview\" id=\"preview-1k\" alt=\"Preview\" />
+                    <div class=\"drop-zone-placeholder\" id=\"placeholder-1k\">Kéo thả ảnh vào đây<br/>hoặc click để chọn</div>
+                    <div class=\"drop-zone-status\" id=\"status-1k\"></div>
+                    <input type=\"file\" id=\"file-input-1k\" accept=\"image/*\" style=\"display: none;\" onchange=\"handleFileSelect(event, '1k')\" />
+                </div>
+                <div class=\"drop-zone\" id=\"drop-zone-10k\" 
+                     ondragover=\"event.preventDefault(); this.classList.add('dragover');\" 
+                     ondragleave=\"this.classList.remove('dragover');\" 
+                     ondrop=\"handleDrop(event, '10k')\"
+                     onclick=\"document.getElementById('file-input-10k').click()\">
+                    <div class=\"drop-zone-label\">💵 Ảnh 10K</div>
+                    <img class=\"drop-zone-preview\" id=\"preview-10k\" alt=\"Preview\" />
+                    <div class=\"drop-zone-placeholder\" id=\"placeholder-10k\">Kéo thả ảnh vào đây<br/>hoặc click để chọn</div>
+                    <div class=\"drop-zone-status\" id=\"status-10k\"></div>
+                    <input type=\"file\" id=\"file-input-10k\" accept=\"image/*\" style=\"display: none;\" onchange=\"handleFileSelect(event, '10k')\" />
+                </div>
+                <div class=\"drop-zone\" id=\"drop-zone-bet-button\" 
+                     ondragover=\"event.preventDefault(); this.classList.add('dragover');\" 
+                     ondragleave=\"this.classList.remove('dragover');\" 
+                     ondrop=\"handleDrop(event, 'bet-button')\"
+                     onclick=\"document.getElementById('file-input-bet-button').click()\">
+                    <div class=\"drop-zone-label\">🎯 Nút Cược</div>
+                    <img class=\"drop-zone-preview\" id=\"preview-bet-button\" alt=\"Preview\" />
+                    <div class=\"drop-zone-placeholder\" id=\"placeholder-bet-button\">Kéo thả ảnh vào đây<br/>hoặc click để chọn</div>
+                    <div class=\"drop-zone-status\" id=\"status-bet-button\"></div>
+                    <input type=\"file\" id=\"file-input-bet-button\" accept=\"image/*\" style=\"display: none;\" onchange=\"handleFileSelect(event, 'bet-button')\" />
+                </div>
+                <div class=\"drop-zone\" id=\"drop-zone-place-bet-button\" 
+                     ondragover=\"event.preventDefault(); this.classList.add('dragover');\" 
+                     ondragleave=\"this.classList.remove('dragover');\" 
+                     ondrop=\"handleDrop(event, 'place-bet-button')\"
+                     onclick=\"document.getElementById('file-input-place-bet-button').click()\">
+                    <div class=\"drop-zone-label\">🚀 Nút Đặt Cược</div>
+                    <img class=\"drop-zone-preview\" id=\"preview-place-bet-button\" alt=\"Preview\" />
+                    <div class=\"drop-zone-placeholder\" id=\"placeholder-place-bet-button\">Kéo thả ảnh vào đây<br/>hoặc click để chọn</div>
+                    <div class=\"drop-zone-status\" id=\"status-place-bet-button\"></div>
+                    <input type=\"file\" id=\"file-input-place-bet-button\" accept=\"image/*\" style=\"display: none;\" onchange=\"handleFileSelect(event, 'place-bet-button')\" />
+                </div>
+            </div>
         </div>
         <div class=\"card\">
             <div class=\"stats\">
@@ -379,10 +486,129 @@ def _build_dashboard_html() -> str:
             }
         }
 
+        // Drag & Drop handlers for sample images
+        function handleDrop(event, type) {
+            event.preventDefault();
+            event.stopPropagation();
+            const dropZone = event.currentTarget;
+            dropZone.classList.remove('dragover');
+            
+            const files = event.dataTransfer.files;
+            if (files.length > 0) {
+                uploadSampleImage(files[0], type);
+            }
+        }
+        
+        function handleFileSelect(event, type) {
+            const file = event.target.files[0];
+            if (file) {
+                uploadSampleImage(file, type);
+            }
+        }
+        
+        async function uploadSampleImage(file, type) {
+            if (!file.type.startsWith('image/')) {
+                showStatus(type, 'Chỉ chấp nhận file ảnh!', 'error');
+                return;
+            }
+            
+            const statusEl = document.getElementById(`status-${type}`);
+            const previewEl = document.getElementById(`preview-${type}`);
+            const placeholderEl = document.getElementById(`placeholder-${type}`);
+            
+            showStatus(type, 'Đang upload...', 'uploading');
+            
+            // Show preview immediately
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                previewEl.src = e.target.result;
+                previewEl.classList.add('show');
+                placeholderEl.style.display = 'none';
+            };
+            reader.readAsDataURL(file);
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            const endpointMap = {
+                '1k': '/api/mobile/sample-1k/upload',
+                '10k': '/api/mobile/sample-10k/upload',
+                'bet-button': '/api/mobile/sample-bet-button/upload',
+                'place-bet-button': '/api/mobile/sample-place-bet-button/upload'
+            };
+            
+            try {
+                const resp = await fetch(endpointMap[type], {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await resp.json();
+                
+                if (resp.ok && data.success) {
+                    showStatus(type, '✓ Đã lưu thành công!', 'success');
+                    // Load preview from server
+                    loadSamplePreview(type);
+                } else {
+                    showStatus(type, `Lỗi: ${data.detail || 'Upload thất bại'}`, 'error');
+                    previewEl.classList.remove('show');
+                    placeholderEl.style.display = 'block';
+                }
+            } catch (error) {
+                showStatus(type, `Lỗi: ${error.message}`, 'error');
+                previewEl.classList.remove('show');
+                placeholderEl.style.display = 'block';
+            }
+        }
+        
+        function showStatus(type, message, status) {
+            const statusEl = document.getElementById(`status-${type}`);
+            const colors = {
+                'uploading': '#64748b',
+                'success': '#10b981',
+                'error': '#ef4444'
+            };
+            statusEl.innerHTML = `<span style="color: ${colors[status] || '#64748b'}; font-weight: ${status === 'success' ? '600' : 'normal'};">${message}</span>`;
+        }
+        
+        async function loadSamplePreview(type) {
+            const previewEl = document.getElementById(`preview-${type}`);
+            const placeholderEl = document.getElementById(`placeholder-${type}`);
+            
+            const endpointMap = {
+                '1k': '/api/mobile/sample-1k',
+                '10k': '/api/mobile/sample-10k',
+                'bet-button': '/api/mobile/sample-bet-button',
+                'place-bet-button': '/api/mobile/sample-place-bet-button'
+            };
+            
+            try {
+                const resp = await fetch(endpointMap[type]);
+                if (resp.ok) {
+                    const blob = await resp.blob();
+                    const url = URL.createObjectURL(blob);
+                    previewEl.src = url;
+                    previewEl.classList.add('show');
+                    placeholderEl.style.display = 'none';
+                } else {
+                    previewEl.classList.remove('show');
+                    placeholderEl.style.display = 'block';
+                }
+            } catch (error) {
+                previewEl.classList.remove('show');
+                placeholderEl.style.display = 'block';
+            }
+        }
+        
         document.addEventListener('DOMContentLoaded', () => {
             loadHistory();
             loadBettingSamplePreview();
             loadHistorySamplePreview();
+            // Load sample previews
+            loadSamplePreview('1k');
+            loadSamplePreview('10k');
+            loadSamplePreview('bet-button');
+            loadSamplePreview('place-bet-button');
         });
 
         async function copyEndpoint() {
@@ -1275,6 +1501,80 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 except Exception as exc:
                     print(f"Error saving cropped HISTORY image: {exc}")
 
+            # Kiểm tra nếu tien_thang = 0 và winnings_color = null, copy từ record trước gần nhất
+            if (winnings_amount_value == 0 or winnings_amount_value is None) and winnings_color is None:
+                previous_record = mobile_betting_service.get_latest_valid_history_record(device_name)
+                if previous_record:
+                    # Copy các giá trị từ record trước
+                    winnings_amount_value = previous_record.get('tien_thang')
+                    winnings_color = previous_record.get('winnings_color')
+                    column_5 = previous_record.get('column_5') or column_5  # Giữ column_5 hiện tại nếu không có trong record trước
+                    
+                    # Parse lại win_loss từ winnings_amount và winnings_color
+                    # Tính lại win_loss theo 4 cách với giá trị mới
+                    win_loss_methods = []
+                    
+                    # Cách 1: Dựa vào tien_thang
+                    method1 = None
+                    if winnings_amount_value is not None:
+                        if winnings_amount_value > 0:
+                            method1 = "win"
+                        elif winnings_amount_value < 0:
+                            method1 = "loss"
+                    win_loss_methods.append(method1)
+                    
+                    # Cách 2: Dựa vào winnings_color
+                    method2 = None
+                    if winnings_color == "green":
+                        method2 = "win"
+                    elif winnings_color == "red":
+                        method2 = "loss"
+                    win_loss_methods.append(method2)
+                    
+                    # Cách 3: Dựa vào column_5 (so sánh "Đặt" và "Kết quả")
+                    method3 = None
+                    dat_value, ket_qua_value = parse_dat_ket_qua(column_5)
+                    if dat_value and ket_qua_value:
+                        dat_normalized = dat_value.strip().lower()
+                        ket_qua_normalized = ket_qua_value.strip().lower()
+                        if dat_normalized == ket_qua_normalized:
+                            method3 = "win"
+                        else:
+                            method3 = "loss"
+                    win_loss_methods.append(method3)
+                    
+                    # Cách 4: Dựa vào giá trị tuyệt đối
+                    method4 = None
+                    if winnings_amount_value is not None and bet_amount_value is not None:
+                        abs_winnings = abs(winnings_amount_value)
+                        abs_bet = abs(bet_amount_value)
+                        if abs_winnings == abs_bet:
+                            method4 = "loss"
+                        else:
+                            method4 = "win"
+                    win_loss_methods.append(method4)
+                    
+                    # Tổng hợp kết quả
+                    valid_methods = [m for m in win_loss_methods if m is not None]
+                    if len(valid_methods) == 4:
+                        if len(set(valid_methods)) == 1:
+                            win_loss_token = valid_methods[0]
+                        else:
+                            win_loss_token = "unknown"
+                    else:
+                        win_loss_token = "unknown"
+                    
+                    win_loss_label = win_label_from_token(win_loss_token)
+                    
+                    # Tính lại multiplier với win_loss mới
+                    multiplier = mobile_betting_service.calculate_multiplier(
+                        device_name,
+                        win_loss_label,
+                        bet_amount_for_calc,
+                    )
+                    
+                    print(f"[HISTORY] Copied values from previous record #{previous_record.get('record_id')} for device {device_name}: tien_thang={winnings_amount_value}, winnings_color={winnings_color}")
+
             mobile_betting_service.save_analysis_history(
                 {
                     "device_name": device_name,
@@ -1746,6 +2046,154 @@ async def get_betting_sample():
         sample_path = Path("samples/betting_sample.jpg")
         if not sample_path.exists():
             raise HTTPException(status_code=404, detail="Betting sample image not found")
+        
+        return FileResponse(sample_path, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting sample: {exc}")
+
+
+@app.post("/api/mobile/sample-1k/upload")
+async def upload_sample_1k(file: UploadFile = File(...)):
+    """Upload or replace 1K sample image"""
+    try:
+        samples_dir = Path("samples")
+        samples_dir.mkdir(exist_ok=True)
+        
+        sample_path = samples_dir / "sample_1k.jpg"
+        
+        image_data = await file.read()
+        with open(sample_path, "wb") as f:
+            f.write(image_data)
+        
+        return {
+            "success": True,
+            "message": "1K sample image uploaded successfully",
+            "path": str(sample_path)
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
+
+
+@app.post("/api/mobile/sample-10k/upload")
+async def upload_sample_10k(file: UploadFile = File(...)):
+    """Upload or replace 10K sample image"""
+    try:
+        samples_dir = Path("samples")
+        samples_dir.mkdir(exist_ok=True)
+        
+        sample_path = samples_dir / "sample_10k.jpg"
+        
+        image_data = await file.read()
+        with open(sample_path, "wb") as f:
+            f.write(image_data)
+        
+        return {
+            "success": True,
+            "message": "10K sample image uploaded successfully",
+            "path": str(sample_path)
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
+
+
+@app.post("/api/mobile/sample-bet-button/upload")
+async def upload_sample_bet_button(file: UploadFile = File(...)):
+    """Upload or replace Nút Cược sample image"""
+    try:
+        samples_dir = Path("samples")
+        samples_dir.mkdir(exist_ok=True)
+        
+        sample_path = samples_dir / "sample_bet_button.jpg"
+        
+        image_data = await file.read()
+        with open(sample_path, "wb") as f:
+            f.write(image_data)
+        
+        return {
+            "success": True,
+            "message": "Nút Cược sample image uploaded successfully",
+            "path": str(sample_path)
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
+
+
+@app.post("/api/mobile/sample-place-bet-button/upload")
+async def upload_sample_place_bet_button(file: UploadFile = File(...)):
+    """Upload or replace Nút Đặt Cược sample image"""
+    try:
+        samples_dir = Path("samples")
+        samples_dir.mkdir(exist_ok=True)
+        
+        sample_path = samples_dir / "sample_place_bet_button.jpg"
+        
+        image_data = await file.read()
+        with open(sample_path, "wb") as f:
+            f.write(image_data)
+        
+        return {
+            "success": True,
+            "message": "Nút Đặt Cược sample image uploaded successfully",
+            "path": str(sample_path)
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
+
+
+@app.get("/api/mobile/sample-1k")
+async def get_sample_1k():
+    """Get 1K sample image"""
+    try:
+        sample_path = Path("samples/sample_1k.jpg")
+        if not sample_path.exists():
+            raise HTTPException(status_code=404, detail="1K sample image not found")
+        
+        return FileResponse(sample_path, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting sample: {exc}")
+
+
+@app.get("/api/mobile/sample-10k")
+async def get_sample_10k():
+    """Get 10K sample image"""
+    try:
+        sample_path = Path("samples/sample_10k.jpg")
+        if not sample_path.exists():
+            raise HTTPException(status_code=404, detail="10K sample image not found")
+        
+        return FileResponse(sample_path, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting sample: {exc}")
+
+
+@app.get("/api/mobile/sample-bet-button")
+async def get_sample_bet_button():
+    """Get Nút Cược sample image"""
+    try:
+        sample_path = Path("samples/sample_bet_button.jpg")
+        if not sample_path.exists():
+            raise HTTPException(status_code=404, detail="Nút Cược sample image not found")
+        
+        return FileResponse(sample_path, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting sample: {exc}")
+
+
+@app.get("/api/mobile/sample-place-bet-button")
+async def get_sample_place_bet_button():
+    """Get Nút Đặt Cược sample image"""
+    try:
+        sample_path = Path("samples/sample_place_bet_button.jpg")
+        if not sample_path.exists():
+            raise HTTPException(status_code=404, detail="Nút Đặt Cược sample image not found")
         
         return FileResponse(sample_path, media_type="image/jpeg")
     except HTTPException:
