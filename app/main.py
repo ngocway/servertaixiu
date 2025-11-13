@@ -164,6 +164,18 @@ def _build_dashboard_html() -> str:
         .mobile-overlay-box { position: absolute; border: 2px solid rgba(255, 99, 132, 0.85); border-radius: 6px; }
         .mobile-overlay-label { position: absolute; top: -26px; left: 0; background: rgba(255, 99, 132, 0.9); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; }
         pre { background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 20px; overflow: auto; }
+        .sample-images-container {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        .sample-image-card {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 18px 40px rgba(31, 41, 51, 0.2);
+            padding: 32px;
+        }
         .drop-zones-container {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -223,6 +235,9 @@ def _build_dashboard_html() -> str:
             button { width: 100%; }
             .toolbar { flex-direction: column; align-items: stretch; }
             .actions { flex-direction: column; }
+            .sample-images-container {
+                grid-template-columns: 1fr;
+            }
             .drop-zones-container {
                 grid-template-columns: repeat(2, 1fr);
             }
@@ -243,25 +258,27 @@ def _build_dashboard_html() -> str:
             </div>
             <p class=\"muted\">Gá»­i form-data gá»“m <code>file</code>, <code>device_name</code>, <code>betting_method</code> vÃ  cÃ¡c tá»a Ä‘á»™ tÃ¹y chá»n.</p>
         </div>
-        <div class=\"card\" style=\"border-left: 5px solid #10b981;\">
-            <h3 style=\"margin-top: 0;\">📸 BETTING Sample Image</h3>
-            <p class=\"muted\">Upload a sample BETTING image with the seconds timer marked (red box). This image will be used to help ChatGPT identify the correct seconds location.</p>
-            <div style=\"display: flex; gap: 16px; align-items: center; flex-wrap: wrap;\">
-                <input type=\"file\" id=\"betting-sample-input\" accept=\"image/*\" style=\"display: none;\" onchange=\"uploadBettingSample()\">
-                <button class=\"primary\" onclick=\"document.getElementById('betting-sample-input').click()\">📤 Upload/Replace Sample</button>
-                <div id=\"betting-sample-status\" style=\"flex: 1; min-width: 200px;\"></div>
+        <div class=\"sample-images-container\">
+            <div class=\"sample-image-card\" style=\"border-left: 5px solid #10b981;\">
+                <h3 style=\"margin-top: 0;\">📸 BETTING Sample Image</h3>
+                <p class=\"muted\">Upload a sample BETTING image with the seconds timer marked (red box). This image will be used to help ChatGPT identify the correct seconds location.</p>
+                <div style=\"display: flex; gap: 16px; align-items: center; flex-wrap: wrap;\">
+                    <input type=\"file\" id=\"betting-sample-input\" accept=\"image/*\" style=\"display: none;\" onchange=\"uploadBettingSample()\">
+                    <button class=\"primary\" onclick=\"document.getElementById('betting-sample-input').click()\">📤 Upload/Replace Sample</button>
+                    <div id=\"betting-sample-status\" style=\"flex: 1; min-width: 200px;\"></div>
+                </div>
+                <div id=\"betting-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
             </div>
-            <div id=\"betting-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
-        </div>
-        <div class=\"card\" style=\"border-left: 5px solid #3b82f6;\">
-            <h3 style=\"margin-top: 0;\">📸 HISTORY Sample Image</h3>
-            <p class=\"muted\">Upload a sample HISTORY image with the crop region marked in green (#1AFF0D). This image will be used to auto-crop HISTORY screenshots.</p>
-            <div style=\"display: flex; gap: 16px; align-items: center; flex-wrap: wrap;\">
-                <input type=\"file\" id=\"history-sample-input\" accept=\"image/*\" style=\"display: none;\" onchange=\"uploadHistorySample()\">
-                <button class=\"primary\" onclick=\"document.getElementById('history-sample-input').click()\">📤 Upload/Replace Sample</button>
-                <div id=\"history-sample-status\" style=\"flex: 1; min-width: 200px;\"></div>
+            <div class=\"sample-image-card\" style=\"border-left: 5px solid #3b82f6;\">
+                <h3 style=\"margin-top: 0;\">📸 HISTORY Sample Image</h3>
+                <p class=\"muted\">Upload a sample HISTORY image with the crop region marked in green (#1AFF0D). This image will be used to auto-crop HISTORY screenshots.</p>
+                <div style=\"display: flex; gap: 16px; align-items: center; flex-wrap: wrap;\">
+                    <input type=\"file\" id=\"history-sample-input\" accept=\"image/*\" style=\"display: none;\" onchange=\"uploadHistorySample()\">
+                    <button class=\"primary\" onclick=\"document.getElementById('history-sample-input').click()\">📤 Upload/Replace Sample</button>
+                    <div id=\"history-sample-status\" style=\"flex: 1; min-width: 200px;\"></div>
+                </div>
+                <div id=\"history-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
             </div>
-            <div id=\"history-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
         </div>
         <div class=\"card\" style=\"border-left: 5px solid #f59e0b;\">
             <h3 style=\"margin-top: 0;\">🖼️ Ảnh Mẫu (Drag & Drop)</h3>
