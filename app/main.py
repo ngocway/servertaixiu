@@ -196,6 +196,16 @@ def _build_dashboard_html() -> str:
             </div>
             <div id=\"betting-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
         </div>
+        <div class=\"card\" style=\"border-left: 5px solid #3b82f6;\">
+            <h3 style=\"margin-top: 0;\">📸 HISTORY Sample Image</h3>
+            <p class=\"muted\">Upload a sample HISTORY image with the crop region marked in green (#1AFF0D). This image will be used to auto-crop HISTORY screenshots.</p>
+            <div style=\"display: flex; gap: 16px; align-items: center; flex-wrap: wrap;\">
+                <input type=\"file\" id=\"history-sample-input\" accept=\"image/*\" style=\"display: none;\" onchange=\"uploadHistorySample()\">
+                <button class=\"primary\" onclick=\"document.getElementById('history-sample-input').click()\">📤 Upload/Replace Sample</button>
+                <div id=\"history-sample-status\" style=\"flex: 1; min-width: 200px;\"></div>
+            </div>
+            <div id=\"history-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
+        </div>
         <div class=\"card\">
             <div class=\"stats\">
                 <div class=\"stat\">
@@ -324,9 +334,55 @@ def _build_dashboard_html() -> str:
             }
         }
 
+        async function uploadHistorySample() {
+            const input = document.getElementById('history-sample-input');
+            const file = input.files[0];
+            if (!file) return;
+
+            const statusDiv = document.getElementById('history-sample-status');
+            statusDiv.innerHTML = '<span style="color: #64748b;">Uploading...</span>';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const resp = await fetch('/api/mobile/history-sample/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await resp.json();
+                
+                if (resp.ok && data.success) {
+                    statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 600;">✓ Uploaded successfully!</span>';
+                    loadHistorySamplePreview();
+                } else {
+                    statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${data.detail || 'Upload failed'}</span>`;
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${error.message}</span>`;
+            }
+        }
+
+        async function loadHistorySamplePreview() {
+            const previewDiv = document.getElementById('history-sample-preview');
+            try {
+                const resp = await fetch('/api/mobile/history-sample');
+                if (resp.ok) {
+                    const blob = await resp.blob();
+                    const url = URL.createObjectURL(blob);
+                    previewDiv.innerHTML = `<img src="${url}" alt="History Sample" style="max-width: 100%; max-height: 400px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />`;
+                } else {
+                    previewDiv.innerHTML = '<p class="muted">No sample image uploaded yet.</p>';
+                }
+            } catch (error) {
+                previewDiv.innerHTML = '<p class="muted">No sample image uploaded yet.</p>';
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
             loadHistory();
             loadBettingSamplePreview();
+            loadHistorySamplePreview();
         });
 
         async function copyEndpoint() {
@@ -758,95 +814,117 @@ async def mobile_analyze(
             except ValueError:
                 return 0
 
-        # Crop ảnh trước khi gửi cho ChatGPT
-        image_for_chatgpt = image.copy()
-        cropped_region_info = None
-        
-        # Kiểm tra xem có crop region cho BETTING không
-        betting_crop_region = load_betting_crop_region()
-        if betting_crop_region:
-            # Crop theo region đã đánh dấu (giả định là BETTING)
-            # Tính tỉ lệ giữa ảnh mẫu và ảnh thực tế
-            sample_path = Path("samples/betting_sample.jpg")
-            if sample_path.exists():
-                sample_image = Image.open(sample_path)
-                sample_width, sample_height = sample_image.size
-                actual_width, actual_height = image.size
-                
-                # Tính tỉ lệ scale
-                scale_x = actual_width / sample_width
-                scale_y = actual_height / sample_height
-                
-                # Scale crop region
-                crop_x = int(betting_crop_region["x"] * scale_x)
-                crop_y = int(betting_crop_region["y"] * scale_y)
-                crop_width = int(betting_crop_region["width"] * scale_x)
-                crop_height = int(betting_crop_region["height"] * scale_y)
-                
-                # Đảm bảo không vượt quá kích thước ảnh
-                crop_x = max(0, min(crop_x, actual_width - 1))
-                crop_y = max(0, min(crop_y, actual_height - 1))
-                crop_width = min(crop_width, actual_width - crop_x)
-                crop_height = min(crop_height, actual_height - crop_y)
-                
-                if crop_width > 0 and crop_height > 0:
-                    image_for_chatgpt = image_for_chatgpt.crop((
-                        crop_x, crop_y, 
-                        crop_x + crop_width, crop_y + crop_height
-                    ))
-                    cropped_region_info = {
-                        "x": crop_x, "y": crop_y,
-                        "width": crop_width, "height": crop_height
-                    }
-        
-        # Nếu không có crop region cho BETTING, crop HISTORY như cũ
-        if not cropped_region_info:
-            crop_height = max(1, image_for_chatgpt.height // 3)
-            image_for_chatgpt = image_for_chatgpt.crop((0, 0, image_for_chatgpt.width, crop_height))
-        
-        # Convert ảnh đã crop thành bytes để encode base64
-        img_byte_arr = io.BytesIO()
-        image_for_chatgpt.save(img_byte_arr, format='JPEG', quality=95)
-        img_byte_arr.seek(0)
-        image_data_for_chatgpt = img_byte_arr.read()
-        
-        base64_image = base64.b64encode(image_data_for_chatgpt).decode('utf-8')
-        openai_api_key = get_openai_api_key()
+        # Chuẩn bị prompts và crop regions trước (song song với API call phân loại)
+        history_detail_prompt = """Phan tich anh BANG LICH SU da duoc crop va tra ve dung mot JSON:
 
-        detection_prompt = """Phan tich anh giao dien game va tra ve dung mot JSON theo quy tac sau:
+- Chi doc DONG DAU TIEN cua bang (phien moi nhat nam tren cung, dong dau tien trong bang).
+- Doc gia tri o cot "Tổng cược" (cot thu 3) cua DONG DAU TIEN va gan vao khoa "bet_amount" duoi dang so nguyen (bo dau phan cach nghin, vi du: "1,000" -> 1000, "4,000" -> 4000).
+- Doc gia tri o cot "Tiền thắng" (cot thu 4) cua DONG DAU TIEN:
+    * Neu cot "Tiền thắng" hien thi dau gach ngang "-" (khong co so) -> gan "winnings_amount" = null.
+    * Neu cot "Tiền thắng" hien thi so duong (co dau + hoac khong, vi du: "+980", "+3,920", "980") -> lay so nguyen (bo dau + va dau phan cach nghin) va gan vao "winnings_amount" NHUNG GIU NGUYEN DAU DUONG (vi du: 980, 3920).
+    * Neu cot "Tiền thắng" hien thi so am (co dau -, vi du: "-1,000", "-500") -> lay so nguyen (bo dau phan cach nghin) va gan vao "winnings_amount" NHUNG GIU NGUYEN DAU AM (vi du: -1000, -500).
+    * Neu cot "Tiền thắng" hien thi "0" -> gan "winnings_amount" = 0.
+- PHAN TICH MAU SAC cua TEXT trong cot "Tiền thắng":
+    * Neu mau text gan voi mau DO (red, #FF0000, rgb(255,0,0), hoac mau tuong tu) -> gan "winnings_color" = "red".
+    * Neu mau text gan voi mau XANH LA CAY (green, #00FF00, rgb(0,255,0), hoac mau tuong tu) -> gan "winnings_color" = "green".
+    * Neu khong phai mau do hoac xanh la cay -> gan "winnings_color" = null.
+- Doc NOI DUNG o COT THU 5 (cot ben phai cot "Tiền thắng") cua DONG DAU TIEN va gan vao khoa "column_5". 
+    * Cot thu 5 thường chứa thông tin về "Đặt" và "Kết quả", ví dụ: "Đặt Tài, Kết quả Tài" hoặc "Đặt Xỉu, Kết quả Xỉu".
+    * Neu co thong tin "Đặt" va "Kết quả", hay doc day du va gan vao "column_5" theo format: "Đặt <gia_tri>, Kết quả <gia_tri>" (vi du: "Đặt Tài, Kết quả Tài" hoac "Đặt Xỉu, Kết quả Xỉu").
+    * Neu khong co thong tin "Đặt" va "Kết quả", hay doc toan bo noi dung cua cot thu 5 va gan vao "column_5".
+- Lay so phien o cot "Phiên" (cot thu 1) cua DONG DAU TIEN lam gia tri cho khoa "Id" (bo ky tu "#" neu co).
 
-1. Neu anh la popup lich su cuoc (co tieu de "LICH SU" hoac "LỊCH SỬ"):
-   - Day la man hinh HIEN THI BANG LICH SU cac phien da choi, co bang du lieu voi cac cot: Phiên, Tổng cược, Tiền thắng, etc.
-   - Chi doc DONG DAU TIEN cua bang (phien moi nhat nam tren cung, dong dau tien trong bang).
-   - Doc gia tri o cot "Tổng cược" (cot thu 3) cua DONG DAU TIEN va gan vao khoa "bet_amount" duoi dang so nguyen (bo dau phan cach nghin, vi du: "1,000" -> 1000, "4,000" -> 4000).
-   - Doc gia tri o cot "Tiền thắng" (cot thu 4) cua DONG DAU TIEN. Day la cot quan trong nhat de xac dinh win_loss:
-       * Neu cot "Tiền thắng" hien thi dau gach ngang "-" (khong co so) -> gan "winnings_amount" = null va "win_loss" = "unknown".
-       * Neu cot "Tiền thắng" hien thi so duong (co dau + hoac khong, vi du: "+980", "+3,920", "980") -> lay so nguyen (bo dau + va dau phan cach nghin) va gan vao "winnings_amount", sau do gan "win_loss" = "win".
-       * Neu cot "Tiền thắng" hien thi so am (co dau -, vi du: "-1,000", "-500") -> lay so nguyen (bo dau - va dau phan cach nghin) va gan vao "winnings_amount" NHUNG GIU NGUYEN DAU AM (vi du: -1000), sau do gan "win_loss" = "loss".
-       * Neu cot "Tiền thắng" hien thi "0" -> gan "winnings_amount" = 0 va "win_loss" = null.
-   - LUU Y: Chi doc cot "Tiền thắng" trong bang, KHONG doc tu phan "Chi tiết". Gia tri "win_loss" PHẢI dựa vào cot "Tiền thắng" (duong = win, am = loss, "-" = unknown).
-   - Lay so phien o cot "Phiên" (cot thu 1) cua DONG DAU TIEN lam gia tri cho khoa "Id" (bo ky tu "#" neu co).
-   - Tra ve dung JSON: {"image_type":"HISTORY","Id":"<ma phien>","bet_amount":<so tien>,"winnings_amount":<so tien thang/thua hoac null>,"win_loss":<"win"|"loss"|"unknown"|null>}.
-
-2. Neu anh la man hinh DANG CUOC (man hinh choi game chinh):
-   - Day la man hinh CO DONG HO DEM NGUOC (timer countdown) hien thi so giay con lai.
-   - Man hinh nay CO NUT "ĐẶT CƯỢC" hoac "TẤT TAY" hoac "CƯỢC" de dat cuoc.
-   - Man hinh nay CO CAC LUA CHON CUOC nhu "TÀI" (Tai) va "XỈU" (Xiu) hoac cac lua chon tuong tu.
-   - Man hinh nay KHONG CO bang lich su, KHONG CO popup, la man hinh chinh cua game.
-   - QUAN TRONG NHAT: Doc SO GIAY tu bo dem thoi gian:
-       * Ban la mo hinh doc hieu hinh anh (OCR) chuyen xac dinh bo dem thoi gian.
-       * Tim VONG TRON LON co VIEN VANG/CAM o CHINH GIUA man hinh (khong phai o tren, khong phai o duoi, khong phai o ben canh).
-       * Chi doc SO NAM TRONG VONG TRON nay thoi.
-       * So giay la SO NHO co 1-2 chu so (tu 1 den 60, vi du: 26, 39, 40, 38, 25, 10, 5).
-       * BO QUA TAT CA cac so lon hon 2 chu so (vi du: 31,608,201, 32,971,000, 33,232,000 - day la so tien, KHONG PHAI so giay).
-       * BO QUA cac so o banner tren cung, o banner duoi cung, o ben trai, o ben phai.
-       * BO QUA moi chu, bieu tuong, so phiên (#535825), so tien, so nguoi choi.
-       * CHI DOC SO TRONG VONG TRON O GIUA MAN HINH, khong doc so o vi tri khac.
-   - Tra ve JSON: {"image_type":"BETTING","seconds":<so giay>}.
-
-3. Neu khong xac dinh duoc loai anh (khong phai HISTORY, khong phai BETTING), tra ve {"image_type":"UNKNOWN"}.
+Tra ve dung JSON: {"Id":"<ma phien>","bet_amount":<so tien>,"winnings_amount":<so tien thang/thua hoac null>,"winnings_color":<"red"|"green"|null>,"column_5":"<noi dung cot thu 5>"}.
 
 CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
+
+        betting_detail_prompt = """Phan tich anh man hinh BETTING da duoc crop va doc SO GIAY tu bo dem thoi gian:
+
+- Ban la mo hinh doc hieu hinh anh (OCR) chuyen xac dinh bo dem thoi gian.
+- Tim VONG TRON LON co VIEN VANG/CAM o CHINH GIUA man hinh (khong phai o tren, khong phai o duoi, khong phai o ben canh).
+- Chi doc SO NAM TRONG VONG TRON nay thoi.
+- So giay la SO NHO co 1-2 chu so (tu 1 den 60, vi du: 26, 39, 40, 38, 25, 10, 5).
+- BO QUA TAT CA cac so lon hon 2 chu so (vi du: 31,608,201, 32,971,000, 33,232,000 - day la so tien, KHONG PHAI so giay).
+- BO QUA cac so o banner tren cung, o banner duoi cung, o ben trai, o ben phai.
+- BO QUA moi chu, bieu tuong, so phiên (#535825), so tien, so nguoi choi.
+- CHI DOC SO TRONG VONG TRON O GIUA MAN HINH, khong doc so o vi tri khac.
+
+Tra ve JSON: {"seconds":<so giay>}.
+
+CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
+
+        # Chuẩn bị crop regions trước
+        history_crop_region = load_history_crop_region()
+        betting_crop_region = load_betting_crop_region()
+        actual_width, actual_height = image.size
+
+        # Bước 1: Gửi ảnh gốc (chưa crop) cho ChatGPT CHỈ để phân loại
+        img_byte_arr_original = io.BytesIO()
+        image.save(img_byte_arr_original, format='JPEG', quality=95)
+        img_byte_arr_original.seek(0)
+        image_data_original = img_byte_arr_original.read()
+        base64_image_original = base64.b64encode(image_data_original).decode('utf-8')
+        openai_api_key = get_openai_api_key()
+
+        # Prompt chỉ để phân loại (không đọc nội dung chi tiết)
+        classification_prompt = """Phan tich anh giao dien game va xac dinh loai anh:
+
+1. Neu anh la popup lich su cuoc (co tieu de "LICH SU" hoac "LỊCH SỬ", co bang du lieu voi cac cot: Phiên, Tổng cược, Tiền thắng, etc.) -> tra ve {"image_type":"HISTORY"}
+
+2. Neu anh la man hinh DANG CUOC (man hinh choi game chinh co dong ho dem nguoc, co nut "ĐẶT CƯỢC", co cac lua chon cuoc nhu "TÀI" va "XỈU", KHONG CO bang lich su, KHONG CO popup) -> tra ve {"image_type":"BETTING"}
+
+3. Neu khong xac dinh duoc loai anh (khong phai HISTORY, khong phai BETTING) -> tra ve {"image_type":"UNKNOWN"}
+
+CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code block)."""
+
+        # Helper function để gửi API call đọc chi tiết
+        async def send_detail_analysis(prompt: str, cropped_img: Image.Image) -> tuple[str, dict]:
+            """Gửi ảnh đã crop cho ChatGPT để đọc nội dung chi tiết"""
+            img_byte_arr = io.BytesIO()
+            cropped_img.save(img_byte_arr, format='JPEG', quality=85)  # Giảm quality để nhanh hơn
+            img_byte_arr.seek(0)
+            image_data = img_byte_arr.read()
+            base64_image = base64.b64encode(image_data).decode('utf-8')
+            
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {openai_api_key}",
+                    },
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{base64_image}",
+                                            "detail": "high",
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                        "temperature": 0,
+                        "max_tokens": 300 if "HISTORY" in prompt else 100,
+                    },
+                )
+
+                if response.status_code != 200:
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=f"Lỗi ChatGPT: {response.text}",
+                    )
+
+                result = response.json()
+                text = result["choices"][0]["message"]["content"]
+                parsed = parse_json_payload(text)
+                return text, parsed
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
@@ -861,11 +939,11 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": detection_prompt},
+                                {"type": "text", "text": classification_prompt},
                                 {
                                     "type": "image_url",
                                     "image_url": {
-                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                        "url": f"data:image/jpeg;base64,{base64_image_original}",
                                         "detail": "low",
                                     },
                                 },
@@ -873,7 +951,7 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                         }
                     ],
                     "temperature": 0,
-                    "max_tokens": 300,
+                    "max_tokens": 100,
                 },
             )
 
@@ -884,20 +962,97 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                 )
 
             result = response.json()
-            chatgpt_text = result["choices"][0]["message"]["content"]
+            classification_text = result["choices"][0]["message"]["content"]
 
-        parsed_response = parse_json_payload(chatgpt_text)
-        image_type_hint = str(parsed_response.get("image_type") or "").upper()
+        parsed_classification = parse_json_payload(classification_text)
+        image_type_hint = str(parsed_classification.get("image_type") or "").upper()
         if not image_type_hint:
-            if "TYPE: HISTORY" in chatgpt_text.upper() or '"image_type":"HISTORY"' in chatgpt_text.upper():
+            if "TYPE: HISTORY" in classification_text.upper() or '"image_type":"HISTORY"' in classification_text.upper():
                 image_type_hint = "HISTORY"
-            elif "TYPE: GAME" in chatgpt_text.upper() or "TYPE: BETTING" in chatgpt_text.upper() or '"image_type":"GAME"' in chatgpt_text.upper() or '"image_type":"BETTING"' in chatgpt_text.upper():
+            elif "TYPE: GAME" in classification_text.upper() or "TYPE: BETTING" in classification_text.upper() or '"image_type":"GAME"' in classification_text.upper() or '"image_type":"BETTING"' in classification_text.upper():
                 image_type_hint = "BETTING"
         # Normalize: "GAME" -> "BETTING" for consistency
         if image_type_hint == "GAME":
             image_type_hint = "BETTING"
         is_history = image_type_hint == "HISTORY"
         is_betting = image_type_hint == "BETTING"
+
+        # Bước 2: Sau khi biết loại screenshot, crop theo template tương ứng và gửi API call ngay
+        cropped_region_info = None
+        cropped_image = image.copy()  # Ảnh đã crop để gửi cho ChatGPT đọc nội dung
+        image_for_save = image.copy()  # Ảnh để lưu sau khi crop
+        chatgpt_text = ""
+        parsed_response = {}
+        
+        if is_history:
+            # Crop theo HISTORY template nếu có
+            if history_crop_region:
+                sample_path = Path("samples/history_sample.jpg")
+                if sample_path.exists():
+                    sample_image = Image.open(sample_path)
+                    sample_width, sample_height = sample_image.size
+                    
+                    scale_x = actual_width / sample_width
+                    scale_y = actual_height / sample_height
+                    
+                    crop_x = int(history_crop_region["x"] * scale_x)
+                    crop_y = int(history_crop_region["y"] * scale_y)
+                    crop_width = int(history_crop_region["width"] * scale_x)
+                    crop_height = int(history_crop_region["height"] * scale_y)
+                    
+                    crop_x = max(0, min(crop_x, actual_width - 1))
+                    crop_y = max(0, min(crop_y, actual_height - 1))
+                    crop_width = min(crop_width, actual_width - crop_x)
+                    crop_height = min(crop_height, actual_height - crop_y)
+                    
+                    if crop_width > 0 and crop_height > 0:
+                        cropped_image = cropped_image.crop((
+                            crop_x, crop_y, 
+                            crop_x + crop_width, crop_y + crop_height
+                        ))
+                        image_for_save = cropped_image.copy()
+                        cropped_region_info = {
+                            "x": crop_x, "y": crop_y,
+                            "width": crop_width, "height": crop_height
+                        }
+            
+            # Gửi ảnh đã crop cho ChatGPT để đọc nội dung chi tiết
+            chatgpt_text, parsed_response = await send_detail_analysis(history_detail_prompt, cropped_image)
+        
+        elif is_betting:
+            # Crop theo BETTING template nếu có
+            if betting_crop_region:
+                sample_path = Path("samples/betting_sample.jpg")
+                if sample_path.exists():
+                    sample_image = Image.open(sample_path)
+                    sample_width, sample_height = sample_image.size
+                    
+                    scale_x = actual_width / sample_width
+                    scale_y = actual_height / sample_height
+                    
+                    crop_x = int(betting_crop_region["x"] * scale_x)
+                    crop_y = int(betting_crop_region["y"] * scale_y)
+                    crop_width = int(betting_crop_region["width"] * scale_x)
+                    crop_height = int(betting_crop_region["height"] * scale_y)
+                    
+                    crop_x = max(0, min(crop_x, actual_width - 1))
+                    crop_y = max(0, min(crop_y, actual_height - 1))
+                    crop_width = min(crop_width, actual_width - crop_x)
+                    crop_height = min(crop_height, actual_height - crop_y)
+                    
+                    if crop_width > 0 and crop_height > 0:
+                        cropped_image = cropped_image.crop((
+                            crop_x, crop_y, 
+                            crop_x + crop_width, crop_y + crop_height
+                        ))
+                        image_for_save = cropped_image.copy()
+                        cropped_region_info = {
+                            "x": crop_x, "y": crop_y,
+                            "width": crop_width, "height": crop_height
+                        }
+            
+            # Gửi ảnh đã crop cho ChatGPT để đọc nội dung chi tiết
+            chatgpt_text, parsed_response = await send_detail_analysis(betting_detail_prompt, cropped_image)
 
         base_response_data = {
             "device_name": device_name,
@@ -971,33 +1126,125 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                 except Exception:
                     pass
             
-            # Xử lý win_loss dựa trên winnings_amount từ AI response
-            # Ưu tiên dùng win_loss từ AI nếu có, nếu không thì tính từ winnings_amount
-            if win_loss_from_ai == "unknown":
-                win_loss_token = "unknown"
-            elif winnings_amount_raw is None or (isinstance(winnings_amount_raw, str) and winnings_amount_raw.strip() == "-"):
-                # Kiểm tra nếu "Tiền thắng" là "-" trong text response
-                if '"win_loss"\s*:\s*"unknown"' in chatgpt_text or re.search(r'Tiền thắng.*?[-]', chatgpt_text, re.IGNORECASE):
-                    win_loss_token = "unknown"
-                else:
-                    win_loss_token = None
-            elif winnings_amount_value is not None:
-                # Dựa vào giá trị số: dương = win, âm = loss, 0 = null
-                if winnings_amount_value > 0:
-                    win_loss_token = "win"
-                elif winnings_amount_value < 0:
-                    win_loss_token = "loss"
-                else:
-                    win_loss_token = None
-            elif win_loss_from_ai in ["win", "loss"]:
-                # Nếu AI đã trả về win_loss trực tiếp, dùng nó
-                win_loss_token = win_loss_from_ai
+            # Parse winnings_color từ ChatGPT response (cần parse trước để dùng cho logic win_loss)
+            winnings_color = parsed_response.get("winnings_color")
+            if winnings_color:
+                winnings_color = str(winnings_color).lower()
+                if winnings_color not in ["red", "green"]:
+                    winnings_color = None
             else:
-                # Fallback: kiểm tra trong text response
-                if '"win_loss"\s*:\s*"unknown"' in chatgpt_text:
+                # Fallback: tìm trong text response
+                if '"winnings_color"\s*:\s*"red"' in chatgpt_text.lower():
+                    winnings_color = "red"
+                elif '"winnings_color"\s*:\s*"green"' in chatgpt_text.lower():
+                    winnings_color = "green"
+                else:
+                    winnings_color = None
+
+            # Parse column_5 từ ChatGPT response (cần parse trước để dùng cho logic win_loss)
+            column_5 = parsed_response.get("column_5")
+            if not column_5 and chatgpt_text:
+                # Fallback: tìm trong text response
+                column_5_match = re.search(r'"column_5"\s*:\s*"([^"]*)"', chatgpt_text)
+                if column_5_match:
+                    column_5 = column_5_match.group(1)
+                else:
+                    column_5 = None
+
+            # Hàm helper để parse "Đặt" và "Kết quả" từ column_5
+            def parse_dat_ket_qua(column_5_text: str) -> tuple:
+                """Parse 'Đặt' và 'Kết quả' từ column_5. Trả về (dat_value, ket_qua_value) hoặc (None, None)"""
+                if not column_5_text:
+                    return None, None
+                
+                column_5_text = str(column_5_text).strip()
+                # Tìm pattern: "Đặt <value>, Kết quả <value>" hoặc "Đặt Tài. Kết quả: Tài." hoặc tương tự
+                # Có thể có nhiều format: "Đặt Tài, Kết quả Tài", "Đặt: Tài, Kết quả: Tài", "Đặt Tài. Kết quả: Tài.", etc.
+                
+                # Lấy giá trị sau "Đặt" cho đến khi gặp dấu phẩy, dấu chấm, hoặc "Kết quả"
+                # Sử dụng non-greedy match để lấy giá trị ngắn nhất
+                dat_match = re.search(r'Đặt\s*:?\s*([^,\.]+?)(?=[,\.]|\s*Kết quả|$)', column_5_text, re.IGNORECASE)
+                
+                # Lấy giá trị sau "Kết quả" cho đến khi gặp dấu phẩy, dấu chấm, hoặc hết chuỗi
+                ket_qua_match = re.search(r'Kết quả\s*:?\s*([^,\.]+)', column_5_text, re.IGNORECASE)
+                
+                dat_value = dat_match.group(1).strip() if dat_match else None
+                ket_qua_value = ket_qua_match.group(1).strip() if ket_qua_match else None
+                
+                # Loại bỏ dấu chấm và dấu phẩy ở cuối (nếu có)
+                if dat_value:
+                    dat_value = dat_value.rstrip('.,').strip()
+                if ket_qua_value:
+                    ket_qua_value = ket_qua_value.rstrip('.,').strip()
+                
+                return dat_value, ket_qua_value
+
+            # Tính win_loss theo 4 cách
+            win_loss_methods = []
+            
+            # Kiểm tra nếu "Tiền thắng" là "-" → tất cả methods đều trả về None/unknown
+            if winnings_amount_raw is None or (isinstance(winnings_amount_raw, str) and winnings_amount_raw.strip() == "-"):
+                if '"win_loss"\s*:\s*"unknown"' in chatgpt_text or re.search(r'Tiền thắng.*?[-]', chatgpt_text, re.IGNORECASE):
+                    # Nếu là "-", tất cả methods không thể tính được → unknown
                     win_loss_token = "unknown"
                 else:
                     win_loss_token = None
+            else:
+                # Cách 1: Dựa vào tien_thang
+                method1 = None
+                if winnings_amount_value is not None:
+                    if winnings_amount_value > 0:
+                        method1 = "win"
+                    elif winnings_amount_value < 0:
+                        method1 = "loss"
+                win_loss_methods.append(method1)
+                
+                # Cách 2: Dựa vào winnings_color
+                method2 = None
+                if winnings_color == "green":
+                    method2 = "win"
+                elif winnings_color == "red":
+                    method2 = "loss"
+                win_loss_methods.append(method2)
+                
+                # Cách 3: Dựa vào column_5 (so sánh "Đặt" và "Kết quả")
+                method3 = None
+                dat_value, ket_qua_value = parse_dat_ket_qua(column_5)
+                if dat_value and ket_qua_value:
+                    # Chuẩn hóa giá trị (bỏ khoảng trắng, lowercase)
+                    dat_normalized = dat_value.strip().lower()
+                    ket_qua_normalized = ket_qua_value.strip().lower()
+                    if dat_normalized == ket_qua_normalized:
+                        method3 = "win"
+                    else:
+                        method3 = "loss"
+                win_loss_methods.append(method3)
+                
+                # Cách 4: Dựa vào giá trị tuyệt đối của winnings_amount và bet_amount
+                method4 = None
+                if winnings_amount_value is not None and bet_amount_value is not None:
+                    abs_winnings = abs(winnings_amount_value)
+                    abs_bet = abs(bet_amount_value)
+                    if abs_winnings == abs_bet:
+                        method4 = "loss"
+                    else:
+                        method4 = "win"
+                win_loss_methods.append(method4)
+                
+                # Tổng hợp kết quả: Nếu cả 4 cách đều ra cùng 1 kết quả → dùng kết quả đó
+                # Nếu ít nhất 1 cách ra kết quả khác → "unknown"
+                valid_methods = [m for m in win_loss_methods if m is not None]
+                if len(valid_methods) == 4:
+                    # Có đủ 4 methods, kiểm tra xem có giống nhau không
+                    if len(set(valid_methods)) == 1:
+                        # Tất cả đều giống nhau → dùng kết quả đó
+                        win_loss_token = valid_methods[0]
+                    else:
+                        # Có ít nhất 1 method khác → unknown
+                        win_loss_token = "unknown"
+                else:
+                    # Không có đủ 4 methods → không thể xác nhận → unknown
+                    win_loss_token = "unknown"
 
             win_loss_label = win_label_from_token(win_loss_token)
 
@@ -1014,6 +1261,19 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                 win_loss_label,
                 bet_amount_for_calc,
             )
+
+            # Lưu ảnh crop nếu có và là HISTORY
+            cropped_image_path = None
+            if cropped_region_info and is_history and image_for_save:
+                try:
+                    # Lưu ảnh crop vào cùng thư mục với ảnh gốc
+                    original_dir = Path(saved_path).parent
+                    original_name = Path(saved_path).stem
+                    cropped_image_path = original_dir / f"cropped_{original_name}.jpg"
+                    image_for_save.save(cropped_image_path, format='JPEG', quality=95)
+                    cropped_image_path = str(cropped_image_path)
+                except Exception as exc:
+                    print(f"Error saving cropped HISTORY image: {exc}")
 
             mobile_betting_service.save_analysis_history(
                 {
@@ -1042,7 +1302,9 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                 "bet_amount": bet_amount_value,
                 "tien_thang": winnings_amount_value,
                 "winnings_amount": winnings_amount_value,  # Alias cho tương thích
+                "winnings_color": winnings_color,  # "red" hoặc "green" hoặc null
                 "win_loss": win_loss_token,
+                "column_5": column_5,  # Nội dung cột thứ 5 (bên phải cột Tiền thắng)
             }
 
         elif is_betting:
@@ -1060,18 +1322,18 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
                 else (seconds_from_region if seconds_from_region is not None else 0)
             )
 
-            # Lưu ảnh crop nếu có
+            # Lưu ảnh crop nếu có và là BETTING
             cropped_image_path = None
-            if cropped_region_info and image_for_chatgpt:
+            if cropped_region_info and is_betting and image_for_save:
                 try:
                     # Lưu ảnh crop vào cùng thư mục với ảnh gốc
                     original_dir = Path(saved_path).parent
                     original_name = Path(saved_path).stem
                     cropped_image_path = original_dir / f"cropped_{original_name}.jpg"
-                    image_for_chatgpt.save(cropped_image_path, format='JPEG', quality=95)
+                    image_for_save.save(cropped_image_path, format='JPEG', quality=95)
                     cropped_image_path = str(cropped_image_path)
                 except Exception as exc:
-                    print(f"Error saving cropped image: {exc}")
+                    print(f"Error saving cropped BETTING image: {exc}")
 
             mobile_betting_service.save_analysis_history(
                 {
@@ -1216,19 +1478,14 @@ async def get_mobile_history_cropped_image(record_id: int, download: bool = Quer
         if not os.path.exists(image_path):
             raise HTTPException(status_code=404, detail=f"File ảnh không tồn tại: {image_path}")
 
-        # Chỉ crop nếu image_type là HISTORY, BETTING giữ nguyên
-        if image_type == "HISTORY":
-            # Đọc và crop ảnh thành 1/3 chiều cao (phần trên cùng)
-            image = Image.open(image_path)
-            crop_height = max(1, image.height // 3)
-            cropped_image = image.crop((0, 0, image.width, crop_height))
-            
-            # Lưu ảnh crop vào memory
-            img_byte_arr = io.BytesIO()
-            cropped_image.save(img_byte_arr, format='JPEG', quality=95)
-            img_byte_arr.seek(0)
-            
-            extension = os.path.splitext(image_path)[1].lower()
+        # Kiểm tra xem có file cropped đã lưu không
+        original_dir = Path(image_path).parent
+        original_name = Path(image_path).stem
+        cropped_image_path = original_dir / f"cropped_{original_name}.jpg"
+        
+        if cropped_image_path.exists():
+            # Trả về ảnh crop đã lưu
+            extension = os.path.splitext(str(cropped_image_path))[1].lower()
             media_type = {
                 ".jpg": "image/jpeg",
                 ".jpeg": "image/jpeg",
@@ -1238,20 +1495,20 @@ async def get_mobile_history_cropped_image(record_id: int, download: bool = Quer
             }.get(extension, "image/jpeg")
             
             filename = f"cropped_{os.path.basename(image_path)}" if download else None
-            return Response(content=img_byte_arr.read(), media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'} if filename else {})
-        else:
-            # BETTING hoặc các loại khác: trả về ảnh gốc
-            extension = os.path.splitext(image_path)[1].lower()
-            media_type = {
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".png": "image/png",
-                ".gif": "image/gif",
-                ".webp": "image/webp",
-            }.get(extension, "image/jpeg")
-            
-            filename = os.path.basename(image_path) if download else None
-            return FileResponse(image_path, media_type=media_type, filename=filename)
+            return FileResponse(str(cropped_image_path), media_type=media_type, filename=filename)
+        
+        # Nếu không có file crop đã lưu, trả về ảnh gốc
+        extension = os.path.splitext(image_path)[1].lower()
+        media_type = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(extension, "image/jpeg")
+        
+        filename = os.path.basename(image_path) if download else None
+        return FileResponse(image_path, media_type=media_type, filename=filename)
 
     except HTTPException:
         raise
@@ -1269,6 +1526,19 @@ def load_betting_crop_region() -> Optional[Dict[str, int]]:
         return None
     except Exception as exc:
         print(f"Error loading crop region: {exc}")
+        return None
+
+
+def load_history_crop_region() -> Optional[Dict[str, int]]:
+    """Load history crop region from config file"""
+    try:
+        crop_config_path = Path("samples/history_crop_region.json")
+        if crop_config_path.exists():
+            with open(crop_config_path, "r") as f:
+                return json.load(f)
+        return None
+    except Exception as exc:
+        print(f"Error loading history crop region: {exc}")
         return None
 
 
@@ -1358,6 +1628,60 @@ async def upload_betting_sample(file: UploadFile = File(...)):
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
+
+
+@app.post("/api/mobile/history-sample/upload")
+async def upload_history_sample(file: UploadFile = File(...)):
+    """Upload or replace HISTORY sample image and detect crop region"""
+    try:
+        # Create samples directory if not exists
+        samples_dir = Path("samples")
+        samples_dir.mkdir(exist_ok=True)
+        
+        # Save as history_sample.jpg (replace if exists)
+        sample_path = samples_dir / "history_sample.jpg"
+        
+        # Read and save image
+        image_data = await file.read()
+        with open(sample_path, "wb") as f:
+            f.write(image_data)
+        
+        # Detect green crop region (#1AFF0D)
+        crop_region = detect_green_crop_region(str(sample_path))
+        
+        # Save crop region to JSON file
+        crop_config_path = samples_dir / "history_crop_region.json"
+        if crop_region:
+            with open(crop_config_path, "w") as f:
+                json.dump(crop_region, f)
+        else:
+            # Remove config if no region detected
+            if crop_config_path.exists():
+                crop_config_path.unlink()
+        
+        return {
+            "success": True,
+            "message": "History sample image uploaded successfully",
+            "path": str(sample_path),
+            "crop_region": crop_region
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
+
+
+@app.get("/api/mobile/history-sample")
+async def get_history_sample():
+    """Get HISTORY sample image"""
+    try:
+        sample_path = Path("samples/history_sample.jpg")
+        if not sample_path.exists():
+            raise HTTPException(status_code=404, detail="History sample image not found")
+        
+        return FileResponse(sample_path, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting sample: {exc}")
 
 
 @app.get("/api/mobile/history/betting-cropped/{record_id}")
@@ -1464,6 +1788,8 @@ async def download_mobile_history_json(record_id: int):
         elif image_type == "HISTORY":
             # Parse tien_thang từ chatgpt_response nếu có
             tien_thang_value = None
+            winnings_color_value = None
+            column_5_value = None
             chatgpt_response = record.get("chatgpt_response")
             if chatgpt_response:
                 try:
@@ -1503,6 +1829,16 @@ async def download_mobile_history_json(record_id: int):
                                     else:
                                         tien_thang_value = int(winnings_str)
                                     break
+                    
+                    # Parse winnings_color từ chatgpt_response
+                    winnings_color_match = re.search(r'"winnings_color"\s*:\s*"(red|green)"', chatgpt_response, re.IGNORECASE)
+                    if winnings_color_match:
+                        winnings_color_value = winnings_color_match.group(1).lower()
+                    
+                    # Parse column_5 từ chatgpt_response
+                    column_5_match = re.search(r'"column_5"\s*:\s*"([^"]*)"', chatgpt_response)
+                    if column_5_match:
+                        column_5_value = column_5_match.group(1)
                 except Exception as e:
                     # Log error nhưng không crash
                     pass
@@ -1512,20 +1848,26 @@ async def download_mobile_history_json(record_id: int):
                 "bet_amount": record.get("bet_amount"),
                 "tien_thang": tien_thang_value,
                 "winnings_amount": tien_thang_value,  # Alias cho tương thích
+                "winnings_color": winnings_color_value,  # "red" hoặc "green" hoặc null
                 "win_loss": win_token_from_label(record.get("win_loss")),
+                "column_5": column_5_value,  # Nội dung cột thứ 5
             }
         else:
             payload = base_payload
 
-        # Giữ tien_thang và winnings_amount ngay cả khi None, nhưng loại bỏ các field None khác
+        # Giữ tien_thang, winnings_amount, winnings_color và column_5 ngay cả khi None, nhưng loại bỏ các field None khác
         tien_thang_val = payload.pop("tien_thang", None)
         winnings_amount_val = payload.pop("winnings_amount", None)
+        winnings_color_val = payload.pop("winnings_color", None)
+        column_5_val = payload.pop("column_5", None)
         filtered_payload = {k: v for k, v in payload.items() if v is not None}
-        # Thêm lại tien_thang và winnings_amount vào cuối (LUÔN thêm, kể cả khi None)
+        # Thêm lại các field quan trọng vào cuối (LUÔN thêm, kể cả khi None)
         if image_type == "HISTORY":
-            # Đảm bảo luôn có field này trong JSON, ngay cả khi None (sẽ hiển thị null)
+            # Đảm bảo luôn có các field này trong JSON, ngay cả khi None (sẽ hiển thị null)
             filtered_payload["tien_thang"] = tien_thang_val
             filtered_payload["winnings_amount"] = winnings_amount_val
+            filtered_payload["winnings_color"] = winnings_color_val
+            filtered_payload["column_5"] = column_5_val
 
         return filtered_payload
 
