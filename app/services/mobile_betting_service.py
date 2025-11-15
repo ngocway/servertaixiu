@@ -32,7 +32,7 @@ class MobileBettingService:
             )
         """)
         
-        # Table lưu lịch sử xử lý ảnh (giới hạn 100)
+        # Table lưu lịch sử xử lý ảnh (giới hạn: HISTORY 1500, BETTING 3500, UNKNOWN 50, tổng cộng 5500)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS mobile_analysis_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +77,38 @@ class MobileBettingService:
             cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN seconds_region_coords TEXT")
         if 'bet_region_coords' not in existing_columns:
             cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN bet_region_coords TEXT")
+        if 'button_1k_coords' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_1k_coords TEXT")
+        if 'button_1k_error' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_1k_error TEXT")
+        if 'button_10k_coords' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_10k_coords TEXT")
+        if 'button_10k_error' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_10k_error TEXT")
+        if 'button_50k_coords' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_50k_coords TEXT")
+        if 'button_50k_error' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_50k_error TEXT")
+        if 'button_bet_coords' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_bet_coords TEXT")
+        if 'button_bet_error' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_bet_error TEXT")
+        if 'button_place_bet_coords' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_place_bet_coords TEXT")
+        if 'button_place_bet_error' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN button_place_bet_error TEXT")
+        if 'device_real_width' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN device_real_width INTEGER")
+        if 'device_real_height' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN device_real_height INTEGER")
+        if 'screenshot_width' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN screenshot_width INTEGER")
+        if 'screenshot_height' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN screenshot_height INTEGER")
+        if 'actual_image_width' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN actual_image_width INTEGER")
+        if 'actual_image_height' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN actual_image_height INTEGER")
         
         # Table lưu chi tiết verification logs
         cursor.execute("""
@@ -110,6 +142,28 @@ class MobileBettingService:
                 resolution_action TEXT
             )
         """)
+        
+        # Table lưu tọa độ button theo device_name
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS device_button_coords (
+                device_name TEXT PRIMARY KEY,
+                button_1k_coords TEXT,
+                button_10k_coords TEXT,
+                button_50k_coords TEXT,
+                button_bet_coords TEXT,
+                button_place_bet_coords TEXT,
+                betting_match_counter INTEGER DEFAULT 0,
+                last_match_at TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Thêm cột button_50k_coords nếu chưa có (migration)
+        try:
+            cursor.execute("ALTER TABLE device_button_coords ADD COLUMN button_50k_coords TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column đã tồn tại
         
         conn.commit()
         conn.close()
@@ -241,16 +295,29 @@ class MobileBettingService:
         return 0.0
     
     def save_analysis_history(self, record: Dict):
-        """Lưu lịch sử phân tích, giới hạn 100 records"""
+        """Lưu lịch sử phân tích với giới hạn: HISTORY 1500, BETTING 3500, UNKNOWN 50, tổng cộng 5500"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        
+        # Convert button coords dict to JSON string if exists
+        def coords_to_json(coords):
+            return json.dumps(coords) if coords else None
+        
+        button_1k_coords_json = coords_to_json(record.get('button_1k_coords'))
+        button_10k_coords_json = coords_to_json(record.get('button_10k_coords'))
+        button_50k_coords_json = coords_to_json(record.get('button_50k_coords'))
+        button_bet_coords_json = coords_to_json(record.get('button_bet_coords'))
+        button_place_bet_coords_json = coords_to_json(record.get('button_place_bet_coords'))
         
         cursor.execute("""
             INSERT INTO mobile_analysis_history
             (device_name, betting_method, session_id, image_type, seconds_remaining,
              bet_amount, actual_bet_amount, bet_status, win_loss, multiplier, image_path, chatgpt_response,
-             seconds_region_coords, bet_region_coords)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             seconds_region_coords, bet_region_coords, button_1k_coords, button_1k_error,
+             button_10k_coords, button_10k_error, button_50k_coords, button_50k_error, button_bet_coords, button_bet_error,
+             button_place_bet_coords, button_place_bet_error,
+             device_real_width, device_real_height, screenshot_width, screenshot_height, actual_image_width, actual_image_height)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             record.get('device_name'),
             record.get('betting_method'),
@@ -265,28 +332,191 @@ class MobileBettingService:
             record.get('image_path'),
             record.get('chatgpt_response'),
             record.get('seconds_region_coords'),
-            record.get('bet_region_coords')
+            record.get('bet_region_coords'),
+            button_1k_coords_json,
+            record.get('button_1k_error'),
+            button_10k_coords_json,
+            record.get('button_10k_error'),
+            button_50k_coords_json,
+            record.get('button_50k_error'),
+            button_bet_coords_json,
+            record.get('button_bet_error'),
+            button_place_bet_coords_json,
+            record.get('button_place_bet_error'),
+            record.get('device_real_width'),
+            record.get('device_real_height'),
+            record.get('screenshot_width'),
+            record.get('screenshot_height'),
+            record.get('actual_image_width'),
+            record.get('actual_image_height')
         ))
         
         conn.commit()
         
-        # Cleanup: Chỉ giữ 100 records gần nhất
+        # Cleanup: Giữ 1500 HISTORY records gần nhất
         cursor.execute("""
             DELETE FROM mobile_analysis_history
-            WHERE id NOT IN (
+            WHERE image_type = 'HISTORY' 
+            AND id NOT IN (
                 SELECT id FROM mobile_analysis_history
+                WHERE image_type = 'HISTORY'
                 ORDER BY created_at DESC
-                LIMIT 100
+                LIMIT 1500
+            )
+        """)
+        
+        # Cleanup: Giữ 3500 BETTING records gần nhất
+        cursor.execute("""
+            DELETE FROM mobile_analysis_history
+            WHERE image_type = 'BETTING' 
+            AND id NOT IN (
+                SELECT id FROM mobile_analysis_history
+                WHERE image_type = 'BETTING'
+                ORDER BY created_at DESC
+                LIMIT 3500
+            )
+        """)
+        
+        # Cleanup: Giữ 50 UNKNOWN records gần nhất
+        cursor.execute("""
+            DELETE FROM mobile_analysis_history
+            WHERE (image_type = 'UNKNOWN' OR image_type IS NULL)
+            AND id NOT IN (
+                SELECT id FROM mobile_analysis_history
+                WHERE image_type = 'UNKNOWN' OR image_type IS NULL
+                ORDER BY created_at DESC
+                LIMIT 50
             )
         """)
         
         conn.commit()
+        
+        # Cleanup: Giữ 5500 records tổng cộng gần nhất
+        # Nếu tổng số > 5500, xóa các records cũ nhất nhưng vẫn đảm bảo giữ đủ từng loại
+        cursor.execute("""
+            SELECT COUNT(*) FROM mobile_analysis_history
+        """)
+        total_count = cursor.fetchone()[0]
+        
+        if total_count > 5500:
+            # Đếm số records từng loại sau khi đã cleanup từng loại
+            cursor.execute("""
+                SELECT COUNT(*) FROM mobile_analysis_history
+                WHERE image_type = 'HISTORY'
+            """)
+            history_count = cursor.fetchone()[0]
+            
+            cursor.execute("""
+                SELECT COUNT(*) FROM mobile_analysis_history
+                WHERE image_type = 'BETTING'
+            """)
+            betting_count = cursor.fetchone()[0]
+            
+            cursor.execute("""
+                SELECT COUNT(*) FROM mobile_analysis_history
+                WHERE image_type = 'UNKNOWN' OR image_type IS NULL
+            """)
+            unknown_count = cursor.fetchone()[0]
+            
+            # Tính số records cần giữ cho mỗi loại (tối đa theo giới hạn)
+            target_history = min(history_count, 1500)
+            target_betting = min(betting_count, 3500)
+            target_unknown = min(unknown_count, 50)
+            target_total = target_history + target_betting + target_unknown
+            
+            # Nếu tổng số records cần giữ vượt quá 5500, giảm từng loại theo thứ tự ưu tiên
+            # Ưu tiên: HISTORY > BETTING > UNKNOWN
+            if target_total > 5500:
+                excess = target_total - 5500
+                
+                # Giảm từ UNKNOWN trước
+                if target_unknown > 0 and excess > 0:
+                    reduce_unknown = min(excess, target_unknown)
+                    target_unknown -= reduce_unknown
+                    excess -= reduce_unknown
+                
+                # Giảm từ BETTING
+                if target_betting > 0 and excess > 0:
+                    reduce_betting = min(excess, target_betting)
+                    target_betting -= reduce_betting
+                    excess -= reduce_betting
+                
+                # Giảm từ HISTORY
+                if target_history > 0 and excess > 0:
+                    reduce_history = min(excess, target_history)
+                    target_history -= reduce_history
+            
+            # Xóa các records vượt quá giới hạn từng loại
+            if history_count > target_history:
+                cursor.execute("""
+                    DELETE FROM mobile_analysis_history
+                    WHERE image_type = 'HISTORY'
+                    AND id NOT IN (
+                        SELECT id FROM mobile_analysis_history
+                        WHERE image_type = 'HISTORY'
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    )
+                """, (target_history,))
+            
+            if betting_count > target_betting:
+                cursor.execute("""
+                    DELETE FROM mobile_analysis_history
+                    WHERE image_type = 'BETTING'
+                    AND id NOT IN (
+                        SELECT id FROM mobile_analysis_history
+                        WHERE image_type = 'BETTING'
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    )
+                """, (target_betting,))
+            
+            if unknown_count > target_unknown:
+                cursor.execute("""
+                    DELETE FROM mobile_analysis_history
+                    WHERE (image_type = 'UNKNOWN' OR image_type IS NULL)
+                    AND id NOT IN (
+                        SELECT id FROM mobile_analysis_history
+                        WHERE image_type = 'UNKNOWN' OR image_type IS NULL
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    )
+                """, (target_unknown,))
+            
+            conn.commit()
+            
+            # Cuối cùng, đảm bảo tổng số không vượt quá 5500
+            cursor.execute("SELECT COUNT(*) FROM mobile_analysis_history")
+            total_count = cursor.fetchone()[0]
+            
+            if total_count > 5500:
+                cursor.execute("""
+                    DELETE FROM mobile_analysis_history
+                    WHERE id NOT IN (
+                        SELECT id FROM mobile_analysis_history
+                        ORDER BY created_at DESC
+                        LIMIT 5500
+                    )
+                """)
+        
+        conn.commit()
         conn.close()
     
-    def get_analysis_history(self, limit: int = 50) -> List[Dict]:
-        """Lấy lịch sử phân tích"""
+    def get_analysis_history(self, limit: int = 50, page: int = 1) -> Tuple[List[Dict], int]:
+        """Lấy lịch sử phân tích với pagination
+        
+        Returns:
+            Tuple[List[Dict], int]: (danh sách records, tổng số records)
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        
+        # Đếm tổng số records
+        cursor.execute("SELECT COUNT(*) FROM mobile_analysis_history")
+        total_count = cursor.fetchone()[0]
+        
+        # Tính offset
+        offset = (page - 1) * limit
         
         cursor.execute("""
             SELECT id, device_name, betting_method, session_id, image_type,
@@ -294,8 +524,8 @@ class MobileBettingService:
                    image_path, seconds_region_coords, bet_region_coords, created_at
             FROM mobile_analysis_history
             ORDER BY created_at DESC
-            LIMIT ?
-        """, (limit,))
+            LIMIT ? OFFSET ?
+        """, (limit, offset))
         
         rows = cursor.fetchall()
         conn.close()
@@ -320,7 +550,7 @@ class MobileBettingService:
                 'created_at': row[14]
             })
         
-        return history
+        return history, total_count
     
     def save_verification_log(self, log_data: Dict):
         """Lưu log verification"""
@@ -595,6 +825,116 @@ class MobileBettingService:
                     continue
         
         return None
+    
+    def save_device_button_coords(self, device_name: str, coords: Dict):
+        """
+        Lưu tọa độ button cho device
+        coords: dict với keys: button_1k_coords, button_10k_coords, button_bet_coords, button_place_bet_coords
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        def coords_to_json(coords_dict):
+            return json.dumps(coords_dict) if coords_dict else None
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO device_button_coords
+            (device_name, button_1k_coords, button_10k_coords, button_50k_coords, button_bet_coords, 
+             button_place_bet_coords, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (
+            device_name,
+            coords_to_json(coords.get('button_1k_coords')),
+            coords_to_json(coords.get('button_10k_coords')),
+            coords_to_json(coords.get('button_50k_coords')),
+            coords_to_json(coords.get('button_bet_coords')),
+            coords_to_json(coords.get('button_place_bet_coords'))
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_device_button_coords(self, device_name: str) -> Optional[Dict]:
+        """
+        Lấy tọa độ button đã lưu cho device
+        Returns: dict với keys: button_1k_coords, button_10k_coords, button_bet_coords, button_place_bet_coords
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT button_1k_coords, button_10k_coords, button_50k_coords, button_bet_coords, button_place_bet_coords,
+                   betting_match_counter
+            FROM device_button_coords
+            WHERE device_name = ?
+        """, (device_name,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row:
+            return None
+        
+        def json_to_coords(json_str):
+            if json_str:
+                try:
+                    return json.loads(json_str)
+                except Exception:
+                    pass
+            return None
+        
+        return {
+            'button_1k_coords': json_to_coords(row[0]),
+            'button_10k_coords': json_to_coords(row[1]),
+            'button_50k_coords': json_to_coords(row[2]),
+            'button_bet_coords': json_to_coords(row[3]),
+            'button_place_bet_coords': json_to_coords(row[4]),
+            'betting_match_counter': row[5] or 0
+        }
+    
+    def should_match_buttons(self, device_name: str) -> Tuple[bool, int]:
+        """
+        Kiểm tra xem có nên match button lần này không (mỗi 10 screenshot BETTING match 1 lần)
+        Returns: (should_match: bool, current_counter: int)
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT betting_match_counter FROM device_button_coords
+            WHERE device_name = ?
+        """, (device_name,))
+        
+        row = cursor.fetchone()
+        
+        if not row:
+            # Chưa có record, tạo record mới với counter = 0
+            cursor.execute("""
+                INSERT INTO device_button_coords (device_name, betting_match_counter)
+                VALUES (?, 0)
+            """, (device_name,))
+            conn.commit()
+            conn.close()
+            # Lần đầu tiên, cần match ngay
+            return True, 0
+        
+        current_counter = row[0] or 0
+        new_counter = current_counter + 1
+        
+        # Cập nhật counter
+        cursor.execute("""
+            UPDATE device_button_coords
+            SET betting_match_counter = ?, last_match_at = CASE WHEN ? % 10 = 1 THEN CURRENT_TIMESTAMP ELSE last_match_at END
+            WHERE device_name = ?
+        """, (new_counter, new_counter, device_name))
+        
+        conn.commit()
+        conn.close()
+        
+        # Match mỗi 10 lần 1 lần (lần 1, 11, 21, ...)
+        should_match = (new_counter % 10 == 1)
+        
+        return should_match, new_counter
 
 # Singleton instance
 mobile_betting_service = MobileBettingService()

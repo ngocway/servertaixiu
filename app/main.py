@@ -17,6 +17,7 @@ from PIL import Image, ImageOps, ImageEnhance
 import pytesseract
 from pytesseract import TesseractNotFoundError
 import numpy as np
+import cv2
 
 from .services.mobile_betting_service import mobile_betting_service
 
@@ -153,12 +154,19 @@ def _build_dashboard_html() -> str:
         .actions { display: flex; gap: 8px; flex-wrap: wrap; }
         .muted { color: #94a3b8; font-size: 0.85rem; }
         .empty { text-align: center; padding: 40px 0; color: #475569; font-style: italic; }
+        .pagination { display: flex; justify-content: center; align-items: center; gap: 8px; margin-top: 20px; flex-wrap: wrap; }
+        .pagination button { padding: 8px 12px; border: 1px solid #e2e8f0; background: white; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+        .pagination button:hover:not(:disabled) { background: #f1f5f9; }
+        .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .pagination button.active { background: linear-gradient(135deg, #ff6b6b, #f06595); color: white; border-color: transparent; }
+        .pagination-info { color: #64748b; font-size: 0.9rem; margin: 0 10px; }
         .modal { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.55); display: none; align-items: center; justify-content: center; padding: 40px 20px; }
-        .modal-content { background: white; border-radius: 12px; max-width: 960px; width: 100%; max-height: 90vh; display: flex; flex-direction: column; }
+        .modal-content { background: white; border-radius: 12px; max-width: 960px; width: 100%; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
         .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 24px; border-bottom: 1px solid #e2e8f0; }
-        .modal-body { padding: 20px 24px; overflow: auto; }
+        .modal-body { padding: 20px 24px; overflow-y: auto; overflow-x: hidden; display: flex; justify-content: center; align-items: center; min-height: 0; }
         .close-btn { background: none; color: #64748b; font-size: 1.5rem; padding: 0; }
-        .image-wrapper { position: relative; display: inline-block; max-width: 100%; }
+        .image-wrapper { position: relative; display: flex; justify-content: center; align-items: center; max-width: 100%; width: 100%; min-width: 0; }
+        #modal-image { max-width: 100%; max-height: calc(90vh - 200px); width: auto; height: auto; object-fit: contain; border-radius: 10px; display: block; }
         #mobile-image-preview { max-width: 100%; border-radius: 10px; }
         #mobile-image-overlay { position: absolute; inset: 0; pointer-events: none; }
         .mobile-overlay-box { position: absolute; border: 2px solid rgba(255, 99, 132, 0.85); border-radius: 6px; }
@@ -235,18 +243,29 @@ def _build_dashboard_html() -> str:
             button { width: 100%; }
             .toolbar { flex-direction: column; align-items: stretch; }
             .actions { flex-direction: column; }
-            .sample-images-container {
-                grid-template-columns: 1fr;
-            }
             .drop-zones-container {
                 grid-template-columns: repeat(2, 1fr);
+            }
+            /* Ẩn các phần chỉ hiển thị trên desktop */
+            .api-card {
+                display: none;
+            }
+            .sample-images-container {
+                display: none;
+            }
+            .desktop-only {
+                display: none;
+            }
+            /* Ẩn các nút trên mobile, chỉ giữ nút Image */
+            .mobile-hide {
+                display: none;
             }
         }
     </style>
 </head>
 <body>
     <div class=\"shell\">
-        <header>
+        <header class=\"desktop-only\">
             <h1>ðŸ“± Run Mobile Dashboard</h1>
             <p>Theo dÃµi áº£nh tá»« thiáº¿t bá»‹ mobile vÃ  tráº¡ng thÃ¡i phÃ¢n tÃ­ch tá»± Ä‘á»™ng.</p>
         </header>
@@ -256,7 +275,12 @@ def _build_dashboard_html() -> str:
                 <code id=\"api-endpoint\">/api/mobile/analyze</code>
                 <button class=\"secondary small\" onclick=\"copyEndpoint()\">ðŸ“‹ Copy</button>
             </div>
-            <p class=\"muted\">Gá»­i form-data gá»“m <code>file</code>, <code>device_name</code>, <code>betting_method</code> vÃ  cÃ¡c tá»a Ä‘á»™ tÃ¹y chá»n.</p>
+            <p class="muted" style="margin-bottom: 8px;">Gá»­i form-data gá»"m:</p>
+            <div style="margin-left: 16px; margin-bottom: 8px;">
+                <p class="muted" style="margin: 4px 0;"><strong>Bắt buộc:</strong> <code>file</code>, <code>device_name</code>, <code>betting_method</code></p>
+                <p class="muted" style="margin: 4px 0;"><strong>Tùy chọn:</strong> <code>seconds_region_coords</code>, <code>bet_amount_region_coords</code>, <code>screenshot_width</code>, <code>screenshot_height</code>, <code>simulator_width</code>, <code>simulator_height</code></p>
+                <p class="muted" style="margin: 4px 0; color: #10b981;"><strong>Để tính tọa độ nút 1K:</strong> <code>device_real_width</code> (chiều rộng màn hình mobile thật), <code>device_real_height</code> (chiều cao màn hình mobile thật)</p>
+            </div>
         </div>
         <div class=\"sample-images-container\">
             <div class=\"sample-image-card\" style=\"border-left: 5px solid #10b981;\">
@@ -280,7 +304,7 @@ def _build_dashboard_html() -> str:
                 <div id=\"history-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
             </div>
         </div>
-        <div class=\"card\" style=\"border-left: 5px solid #f59e0b;\">
+        <div class=\"card desktop-only\" style=\"border-left: 5px solid #f59e0b;\">
             <h3 style=\"margin-top: 0;\">🖼️ Ảnh Mẫu (Drag & Drop)</h3>
             <p class=\"muted\">Kéo thả ảnh vào các vùng bên dưới để upload ảnh mẫu. Ảnh sẽ tự động lưu khi drop.</p>
             <div class=\"drop-zones-container\">
@@ -305,6 +329,17 @@ def _build_dashboard_html() -> str:
                     <div class=\"drop-zone-placeholder\" id=\"placeholder-10k\">Kéo thả ảnh vào đây<br/>hoặc click để chọn</div>
                     <div class=\"drop-zone-status\" id=\"status-10k\"></div>
                     <input type=\"file\" id=\"file-input-10k\" accept=\"image/*\" style=\"display: none;\" onchange=\"handleFileSelect(event, '10k')\" />
+                </div>
+                <div class=\"drop-zone\" id=\"drop-zone-50k\" 
+                     ondragover=\"event.preventDefault(); this.classList.add('dragover');\" 
+                     ondragleave=\"this.classList.remove('dragover');\" 
+                     ondrop=\"handleDrop(event, '50k')\"
+                     onclick=\"document.getElementById('file-input-50k').click()\">
+                    <div class=\"drop-zone-label\">💴 Ảnh 50K</div>
+                    <img class=\"drop-zone-preview\" id=\"preview-50k\" alt=\"Preview\" />
+                    <div class=\"drop-zone-placeholder\" id=\"placeholder-50k\">Kéo thả ảnh vào đây<br/>hoặc click để chọn</div>
+                    <div class=\"drop-zone-status\" id=\"status-50k\"></div>
+                    <input type=\"file\" id=\"file-input-50k\" accept=\"image/*\" style=\"display: none;\" onchange=\"handleFileSelect(event, '50k')\" />
                 </div>
                 <div class=\"drop-zone\" id=\"drop-zone-bet-button\" 
                      ondragover=\"event.preventDefault(); this.classList.add('dragover');\" 
@@ -331,27 +366,50 @@ def _build_dashboard_html() -> str:
             </div>
         </div>
         <div class=\"card\">
-            <div class=\"stats\">
+            <div class=\"stats desktop-only\">
                 <div class=\"stat\">
                     <h2 id=\"stat-devices\">0</h2>
-                    <p>Thiáº¿t bá»‹</p>
+                    <p>Devices</p>
                 </div>
                 <div class=\"stat\">
                     <h2 id=\"stat-entries\">0</h2>
-                    <p>Báº£n ghi</p>
+                    <p>Records</p>
                 </div>
             </div>
             <div class=\"toolbar\">
-                <button class=\"primary\" onclick=\"loadHistory()\">ðŸ”„ LÃ m má»›i</button>
+                <button class=\"primary\" onclick=\"loadHistory(1)\">🔄 Refresh</button>
                 <label>
-                    Hiá»ƒn thá»‹
-                    <select id=\"history-limit\" onchange=\"loadHistory()\">
+                    Image Type
+                    <select id=\"filter-image-type\" onchange=\"loadHistory(1)\">
+                        <option value=\"\">All</option>
+                        <option value=\"HISTORY\">HISTORY</option>
+                        <option value=\"BETTING\">BETTING</option>
+                    </select>
+                </label>
+                <label>
+                    Device
+                    <select id=\"filter-device\" onchange=\"loadHistory(1)\">
+                        <option value=\"\">All</option>
+                    </select>
+                </label>
+                <label>
+                    Result
+                    <select id=\"filter-result\" onchange=\"loadHistory(1)\">
+                        <option value=\"\">All</option>
+                        <option value=\"Win\">Win</option>
+                        <option value=\"Loss\">Loss</option>
+                        <option value=\"Unknown\">Unknown</option>
+                    </select>
+                </label>
+                <label>
+                    Display
+                    <select id=\"history-limit\" onchange=\"loadHistory(1)\">
                         <option value=\"10\">10</option>
                         <option value=\"25\">25</option>
                         <option value=\"50\" selected>50</option>
                         <option value=\"100\">100</option>
                     </select>
-                    báº£n ghi má»›i nháº¥t
+                    latest records
                 </label>
             </div>
             <div class=\"table-wrapper\">
@@ -359,32 +417,32 @@ def _build_dashboard_html() -> str:
                     <thead>
                         <tr>
                             <th>ID</th>
-                            <th>Thiáº¿t bá»‹</th>
-                            <th>Loáº¡i áº£nh</th>
-                            <th>PhiÃªn</th>
-                            <th class=\"center\">GiÃ¢y</th>
-                            <th class=\"right\">Tiá»n dá»± kiáº¿n</th>
-                            <th class=\"right\">Tiá»n thá»±c</th>
-                            <th class=\"center\">Káº¿t quáº£</th>
-                            <th class=\"center\">Há»‡ sá»‘</th>
-                            <th>HÃ nh Ä‘á»™ng</th>
-                            <th>Thá»i gian</th>
+                            <th>Device</th>
+                            <th>Image Type</th>
+                            <th class=\"center\">Seconds</th>
+                            <th class=\"right\">Bet amount</th>
+                            <th class=\"center\">Result</th>
+                            <th>Action</th>
                         </tr>
                     </thead>
                     <tbody id=\"history-body\">
-                        <tr><td colspan=\"11\" class=\"empty\">Äang táº£i dá»¯ liá»‡u...</td></tr>
+                        <tr><td colspan="7" class=\"empty\">Äang táº£i dá»¯ liá»‡u...</td></tr>
                     </tbody>
                 </table>
             </div>
+            <div id=\"pagination\" style=\"margin-top: 20px; display: flex; justify-content: center; align-items: center; gap: 10px; flex-wrap: wrap;\"></div>
         </div>
     </div>
 
     <div class=\"modal\" id=\"image-modal\">
         <div class=\"modal-content\">
             <div class=\"modal-header\">
-                <h3>áº¢nh Run Mobile #<span id=\"modal-image-id\"></span></h3>
+                <div>
+                    <h3>áº¢nh Run Mobile #<span id=\"modal-image-id\"></span></h3>
+                    <div id=\"modal-image-info\" style=\"font-size: 12px; color: #64748b; margin-top: 4px;\"></div>
+                </div>
                 <div class=\"actions\">
-                    <a id=\"download-link\" class=\"secondary small\" href=\"#\" download>â¬‡ï¸ Táº£i áº£nh</a>
+                    <a id=\"download-link\" class=\"secondary small\" href=\"#\" download>â¬‡ï¸ Táº£i áº¢nh</a>
                     <button class=\"close-btn\" onclick=\"closeImageModal()\">&times;</button>
                 </div>
             </div>
@@ -550,6 +608,7 @@ def _build_dashboard_html() -> str:
             const endpointMap = {
                 '1k': '/api/mobile/sample-1k/upload',
                 '10k': '/api/mobile/sample-10k/upload',
+                '50k': '/api/mobile/sample-50k/upload',
                 'bet-button': '/api/mobile/sample-bet-button/upload',
                 'place-bet-button': '/api/mobile/sample-place-bet-button/upload'
             };
@@ -595,16 +654,23 @@ def _build_dashboard_html() -> str:
             const endpointMap = {
                 '1k': '/api/mobile/sample-1k',
                 '10k': '/api/mobile/sample-10k',
+                '50k': '/api/mobile/sample-50k',
                 'bet-button': '/api/mobile/sample-bet-button',
                 'place-bet-button': '/api/mobile/sample-place-bet-button'
             };
             
             try {
-                const resp = await fetch(endpointMap[type]);
+                // Thêm timestamp để tránh cache
+                const url = endpointMap[type] + '?t=' + Date.now();
+                const resp = await fetch(url);
                 if (resp.ok) {
                     const blob = await resp.blob();
-                    const url = URL.createObjectURL(blob);
-                    previewEl.src = url;
+                    // Revoke URL cũ nếu có để tránh memory leak
+                    if (previewEl.src && previewEl.src.startsWith('blob:')) {
+                        URL.revokeObjectURL(previewEl.src);
+                    }
+                    const newUrl = URL.createObjectURL(blob);
+                    previewEl.src = newUrl;
                     previewEl.classList.add('show');
                     placeholderEl.style.display = 'none';
                 } else {
@@ -624,6 +690,7 @@ def _build_dashboard_html() -> str:
             // Load sample previews
             loadSamplePreview('1k');
             loadSamplePreview('10k');
+            loadSamplePreview('50k');
             loadSamplePreview('bet-button');
             loadSamplePreview('place-bet-button');
         });
@@ -634,66 +701,200 @@ def _build_dashboard_html() -> str:
             alert('ÄÃ£ copy endpoint!');
         }
 
-        async function loadHistory() {
-            const limit = document.getElementById('history-limit').value;
+        let currentPage = 1;
+        let allHistoryData = [];
+        let filteredHistoryData = [];
+
+        async function loadHistory(page = 1) {
+            currentPage = page;
+            const limit = parseInt(document.getElementById('history-limit').value);
+            const filterImageType = document.getElementById('filter-image-type').value;
+            const filterDevice = document.getElementById('filter-device').value;
+            const filterResult = document.getElementById('filter-result').value;
             const tbody = document.getElementById('history-body');
-            tbody.innerHTML = '<tr><td colspan="11" class="empty">Äang táº£i dá»¯ liá»‡u...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="empty">Äang táº£i dá»¯ liá»‡u...</td></tr>';
             try {
-                const resp = await fetch(`/api/mobile/history?limit=${limit}`);
+                // Lấy tất cả data từ server (không paginate ở server vì cần filter ở client)
+                const resp = await fetch(`/api/mobile/history?limit=10000&page=1`);
                 const data = await resp.json();
                 if (!resp.ok || !data.success) {
-                    throw new Error(data.detail || 'KhÃ´ng thá»ƒ táº£i dá»¯ liá»‡u');
+                    throw new Error(data.detail || 'Failed to load data');
                 }
 
-                document.getElementById('stat-entries').textContent = data.total;
-                const uniqueDevices = Array.from(new Set(data.history.map(item => item.device_name))).filter(Boolean);
+                // Lưu tất cả data
+                allHistoryData = data.history;
+
+                // Populate Device dropdown với danh sách devices từ data
+                const uniqueDevices = Array.from(new Set(allHistoryData.map(item => item.device_name))).filter(Boolean);
+                const deviceSelect = document.getElementById('filter-device');
+                const currentDeviceValue = deviceSelect.value;
+                
+                // Lưu giá trị hiện tại và clear dropdown
+                deviceSelect.innerHTML = '<option value="">All</option>';
+                
+                // Thêm các device vào dropdown
+                uniqueDevices.forEach(device => {
+                    const option = document.createElement('option');
+                    option.value = device;
+                    option.textContent = device;
+                    deviceSelect.appendChild(option);
+                });
+                
+                // Khôi phục giá trị đã chọn nếu vẫn còn trong danh sách
+                if (currentDeviceValue && uniqueDevices.includes(currentDeviceValue)) {
+                    deviceSelect.value = currentDeviceValue;
+                }
+
+                // Filter data theo các giá trị đã chọn
+                filteredHistoryData = allHistoryData;
+                
+                if (filterImageType) {
+                    filteredHistoryData = filteredHistoryData.filter(record => record.image_type === filterImageType);
+                }
+                
+                if (filterDevice) {
+                    filteredHistoryData = filteredHistoryData.filter(record => record.device_name === filterDevice);
+                }
+                
+                if (filterResult) {
+                    // Normalize result value để so sánh
+                    filteredHistoryData = filteredHistoryData.filter(record => {
+                        const recordResult = record.win_loss || 'Unknown';
+                        if (filterResult === 'Unknown') {
+                            return !recordResult || recordResult === '-' || recordResult === 'Unknown';
+                        }
+                        return recordResult === filterResult;
+                    });
+                }
+
+                // Paginate filtered data
+                const totalFiltered = filteredHistoryData.length;
+                const totalPages = Math.ceil(totalFiltered / limit);
+                const startIndex = (currentPage - 1) * limit;
+                const endIndex = startIndex + limit;
+                const paginatedHistory = filteredHistoryData.slice(startIndex, endIndex);
+
+                document.getElementById('stat-entries').textContent = totalFiltered;
                 document.getElementById('stat-devices').textContent = uniqueDevices.length;
 
-                if (data.history.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="11" class="empty">ChÆ°a cÃ³ dá»¯ liá»‡u</td></tr>';
+                if (paginatedHistory.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="empty">No data available</td></tr>';
+                    renderPagination(1, 0);
                     return;
                 }
 
                 tbody.innerHTML = '';
-                data.history.forEach(record => {
+                paginatedHistory.forEach(record => {
                     const tr = document.createElement('tr');
 
                     const tagClass = record.image_type === 'HISTORY' ? 'history' : (record.image_type === 'BETTING' ? 'betting' : 'unknown');
                     const tagLabel = record.image_type || 'UNKNOWN';
 
                     const planned = record.bet_amount ?? '-';
-                    const actual = record.actual_bet_amount ?? '-';
                     const winLoss = record.win_loss || '-';
-                    const multiplier = record.multiplier ?? '-';
                     const seconds = record.seconds_remaining ?? '-';
-                    const session = record.session_id || '-';
-                    const createdAt = record.created_at ? new Date(record.created_at).toLocaleString('vi-VN') : '-';
 
                     tr.innerHTML = `
                         <td>#${record.id}</td>
                         <td>${record.device_name || '-'}</td>
                         <td><span class="tag ${tagClass}">${tagLabel}</span></td>
-                        <td>${session}</td>
                         <td class="center">${seconds}</td>
                         <td class="right">${formatNumber(planned)}</td>
-                        <td class="right">${formatNumber(actual)}</td>
                         <td class="center">${winLoss}</td>
-                        <td class="center">${multiplier}</td>
                         <td class="actions">
                             ${record.image_path ? `<button class="secondary small" data-id="${record.id}" data-seconds="${record.seconds_region_coords || ''}" data-bet="${record.bet_region_coords || ''}" onclick="openImageModal(this)">🖼️ Image</button>` : ''}
-                            ${record.image_type === 'HISTORY' && record.image_path ? `<button class="secondary small" data-id="${record.id}" onclick="openCroppedImageModal(this)">✂️ View Cropped</button>` : ''}
-                            ${record.image_type === 'BETTING' && record.image_path ? `<button class="secondary small" data-id="${record.id}" onclick="openBettingCroppedImageModal(this)">✂️ View Cropped</button>` : ''}
-                            <button class="primary small" onclick="openJsonModal(${record.id})">JSON</button>
-                            <button class="secondary small" onclick="downloadJson(${record.id})">💾 Download JSON</button>
+                            ${record.image_type === 'HISTORY' && record.image_path ? `<button class="secondary small mobile-hide" data-id="${record.id}" onclick="openCroppedImageModal(this)">✂️ View Cropped</button>` : ''}
+                            ${record.image_type === 'BETTING' && record.image_path ? `<button class="secondary small mobile-hide" data-id="${record.id}" onclick="openBettingCroppedImageModal(this)">✂️ View Cropped</button>` : ''}
+                            <button class="primary small mobile-hide" onclick="openJsonModal(${record.id})">JSON</button>
+                            <button class="secondary small mobile-hide" onclick="downloadJson(${record.id})">💾 Download JSON</button>
                         </td>
-                        <td>${createdAt}</td>
                     `;
                     tbody.appendChild(tr);
                 });
+                
+                // Render pagination
+                renderPagination(currentPage, totalPages);
             } catch (error) {
                 console.error(error);
-                tbody.innerHTML = `<tr><td colspan="11" class="empty">${error.message}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="empty">${error.message}</td></tr>`;
+                renderPagination(1, 0);
             }
+        }
+
+        function renderPagination(currentPage, totalPages) {
+            const paginationDiv = document.getElementById('pagination');
+            if (!paginationDiv) return;
+            
+            paginationDiv.innerHTML = '';
+            
+            if (totalPages <= 1) {
+                return;
+            }
+            
+            // Previous button
+            const prevBtn = document.createElement('button');
+            prevBtn.textContent = '« Previous';
+            prevBtn.disabled = currentPage === 1;
+            prevBtn.onclick = () => loadHistory(currentPage - 1);
+            paginationDiv.appendChild(prevBtn);
+            
+            // Page numbers
+            const maxVisiblePages = 5;
+            let startPage = Math.max(1, currentPage - Math.floor(maxVisiblePages / 2));
+            let endPage = Math.min(totalPages, startPage + maxVisiblePages - 1);
+            
+            if (endPage - startPage < maxVisiblePages - 1) {
+                startPage = Math.max(1, endPage - maxVisiblePages + 1);
+            }
+            
+            if (startPage > 1) {
+                const firstBtn = document.createElement('button');
+                firstBtn.textContent = '1';
+                firstBtn.onclick = () => loadHistory(1);
+                paginationDiv.appendChild(firstBtn);
+                
+                if (startPage > 2) {
+                    const ellipsis = document.createElement('span');
+                    ellipsis.textContent = '...';
+                    ellipsis.className = 'pagination-info';
+                    paginationDiv.appendChild(ellipsis);
+                }
+            }
+            
+            for (let i = startPage; i <= endPage; i++) {
+                const pageBtn = document.createElement('button');
+                pageBtn.textContent = i;
+                pageBtn.className = i === currentPage ? 'active' : '';
+                pageBtn.onclick = () => loadHistory(i);
+                paginationDiv.appendChild(pageBtn);
+            }
+            
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    const ellipsis = document.createElement('span');
+                    ellipsis.textContent = '...';
+                    ellipsis.className = 'pagination-info';
+                    paginationDiv.appendChild(ellipsis);
+                }
+                
+                const lastBtn = document.createElement('button');
+                lastBtn.textContent = totalPages;
+                lastBtn.onclick = () => loadHistory(totalPages);
+                paginationDiv.appendChild(lastBtn);
+            }
+            
+            // Next button
+            const nextBtn = document.createElement('button');
+            nextBtn.textContent = 'Next »';
+            nextBtn.disabled = currentPage === totalPages;
+            nextBtn.onclick = () => loadHistory(currentPage + 1);
+            paginationDiv.appendChild(nextBtn);
+            
+            // Page info
+            const info = document.createElement('span');
+            info.className = 'pagination-info';
+            info.textContent = `Page ${currentPage} of ${totalPages}`;
+            paginationDiv.appendChild(info);
         }
 
         function formatNumber(value) {
@@ -720,6 +921,26 @@ def _build_dashboard_html() -> str:
             overlay.innerHTML = '';
             overlay.dataset.seconds = seconds;
             overlay.dataset.bet = bet;
+
+            // Lấy thông tin kích thước
+            fetch(`/api/mobile/history/image-info/${recordId}`)
+                .then(res => res.json())
+                .then(data => {
+                    const infoEl = document.getElementById('modal-image-info');
+                    if (data.actual_image_width && data.actual_image_height) {
+                        let infoText = `Screenshot: ${data.actual_image_width} x ${data.actual_image_height}`;
+                        if (data.device_real_width && data.device_real_height) {
+                            infoText += ` | Device: ${data.device_real_width} x ${data.device_real_height}`;
+                        }
+                        infoEl.textContent = infoText;
+                    } else {
+                        infoEl.textContent = '';
+                    }
+                })
+                .catch(err => {
+                    console.error('Error fetching image info:', err);
+                    document.getElementById('modal-image-info').textContent = '';
+                });
 
             image.onload = () => renderOverlay();
             document.getElementById('image-modal').style.display = 'flex';
@@ -907,6 +1128,8 @@ async def mobile_analyze(
     screenshot_height: Optional[int] = Form(None),
     simulator_width: Optional[int] = Form(None),
     simulator_height: Optional[int] = Form(None),
+    device_real_width: Optional[int] = Form(None),
+    device_real_height: Optional[int] = Form(None),
 ):
     """Nháº­n áº£nh tá»« mobile vÃ  phÃ¢n tÃ­ch."""
     try:
@@ -1101,9 +1324,12 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
         betting_crop_region = load_betting_crop_region()
         actual_width, actual_height = image.size
 
-        # Bước 1: Gửi ảnh gốc (chưa crop) cho ChatGPT CHỈ để phân loại
+        # Bước 1: Gửi nửa trên của ảnh cho ChatGPT CHỈ để phân loại
+        # Crop nửa trên của ảnh để giảm kích thước và tăng tốc độ
+        top_half_image = image.crop((0, 0, actual_width, actual_height // 2))
+        
         img_byte_arr_original = io.BytesIO()
-        image.save(img_byte_arr_original, format='JPEG', quality=95)
+        top_half_image.save(img_byte_arr_original, format='JPEG', quality=95)
         img_byte_arr_original.seek(0)
         image_data_original = img_byte_arr_original.read()
         base64_image_original = base64.b64encode(image_data_original).decode('utf-8')
@@ -1112,11 +1338,11 @@ CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
         # Prompt chỉ để phân loại (không đọc nội dung chi tiết)
         classification_prompt = """Phan tich anh giao dien game va xac dinh loai anh:
 
-1. Neu anh la popup lich su cuoc (co tieu de "LICH SU" hoac "LỊCH SỬ", co bang du lieu voi cac cot: Phiên, Tổng cược, Tiền thắng, etc.) -> tra ve {"image_type":"HISTORY"}
+1. Neu co tieu de "LICH SU" hoac "LỊCH SỬ" -> tra ve {"image_type":"HISTORY"}
 
-2. Neu anh la man hinh DANG CUOC (man hinh choi game chinh co dong ho dem nguoc, co nut "ĐẶT CƯỢC", co cac lua chon cuoc nhu "TÀI" va "XỈU", KHONG CO bang lich su, KHONG CO popup) -> tra ve {"image_type":"BETTING"}
+2. Neu co lua chon cuoc "TÀI" va "XỈU" hoac co dong ho dem nguoc -> tra ve {"image_type":"BETTING"}
 
-3. Neu khong xac dinh duoc loai anh (khong phai HISTORY, khong phai BETTING) -> tra ve {"image_type":"UNKNOWN"}
+3. Neu khong phai HISTORY, khong phai BETTING -> tra ve {"image_type":"UNKNOWN"}
 
 CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code block)."""
 
@@ -1147,7 +1373,7 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                                         "type": "image_url",
                                         "image_url": {
                                             "url": f"data:image/jpeg;base64,{base64_image}",
-                                            "detail": "high",
+                                            "detail": "low",
                                         },
                                     },
                                 ],
@@ -1652,6 +1878,103 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 except Exception as exc:
                     print(f"Error saving cropped BETTING image: {exc}")
 
+            # Kiểm tra xem đã có tọa độ button đã lưu cho device này chưa
+            saved_coords = mobile_betting_service.get_device_button_coords(device_name)
+            should_match, match_counter = mobile_betting_service.should_match_buttons(device_name)
+            
+            # Hàm helper để tìm và tính tọa độ cho một loại button
+            def find_button_coords(sample_path: Path, button_name: str):
+                coords = None
+                error = None
+                
+                if not sample_path.exists():
+                    error = f"Thiếu ảnh mẫu {button_name}. Vui lòng upload ảnh {button_name} vào vùng drop trên dashboard."
+                elif not device_real_width or not device_real_height:
+                    missing_params = []
+                    if not device_real_width:
+                        missing_params.append("device_real_width")
+                    if not device_real_height:
+                        missing_params.append("device_real_height")
+                    error = f"Thiếu tham số: {', '.join(missing_params)}. Client cần gửi kích thước màn hình mobile thật trong request."
+                else:
+                    try:
+                        template_match_result = find_template_in_image(str(sample_path), image, threshold=0.5)
+                        if template_match_result:
+                            # Template matching trả về tọa độ điểm chính giữa trong không gian của image (actual_image_width x actual_image_height)
+                            image_center_x = template_match_result["center_x"]
+                            image_center_y = template_match_result["center_y"]
+                            
+                            # Scale trực tiếp từ image coordinates sang device coordinates
+                            # Dùng actual_image_width/height (kích thước screenshot thực tế) và device_real_width/height (kích thước màn hình thật)
+                            scale_to_device_x = device_real_width / actual_image_width if actual_image_width > 0 else 1.0
+                            scale_to_device_y = device_real_height / actual_image_height if actual_image_height > 0 else 1.0
+                            
+                            device_x = int(image_center_x * scale_to_device_x)
+                            device_y = int(image_center_y * scale_to_device_y)
+                            
+                            coords = {
+                                "x": device_x,
+                                "y": device_y,
+                                "confidence": template_match_result.get("confidence", 0.0)
+                            }
+                            print(f"Found {button_name} button at device coordinates: ({device_x}, {device_y}), confidence: {template_match_result.get('confidence', 0.0):.2f}")
+                        else:
+                            error = f"Không tìm thấy ảnh {button_name} trong screenshot BETTING. Template matching không khớp (confidence < 0.5). Kiểm tra lại ảnh mẫu {button_name} hoặc screenshot."
+                    except Exception as exc:
+                        error = f"Lỗi khi xử lý template matching cho {button_name}: {str(exc)}"
+                        print(f"Error finding {button_name} template in BETTING image: {exc}")
+                
+                return coords, error
+            
+            # Nút Cược và 1K: LUÔN match mỗi lần
+            print(f"[BETTING] Matching Nút Cược and 1K for device {device_name} (always match)")
+            button_bet_coords, button_bet_error = find_button_coords(Path("samples/sample_bet_button.jpg"), "Nút Cược")
+            button_1k_coords, button_1k_error = find_button_coords(Path("samples/sample_1k.jpg"), "1K")
+            
+            # 10K, 50K, Nút Đặt Cược: chỉ match khi đến lượt (mỗi 10 lần 1 lần)
+            if saved_coords and not should_match:
+                print(f"[BETTING] Using saved button coordinates for 10K/50K/PlaceBet (counter: {match_counter}, skip matching)")
+                button_10k_coords = saved_coords.get('button_10k_coords')
+                button_50k_coords = saved_coords.get('button_50k_coords')
+                button_place_bet_coords = saved_coords.get('button_place_bet_coords')
+                button_10k_error = None
+                button_50k_error = None
+                button_place_bet_error = None
+                print(f"[BETTING] Loaded saved coordinates - 10K: {button_10k_coords}, 50K: {button_50k_coords}, PlaceBet: {button_place_bet_coords}")
+            else:
+                # Cần match 10K, 50K, Nút Đặt Cược: chưa có tọa độ hoặc đến lượt match (mỗi 10 lần 1 lần)
+                print(f"[BETTING] Matching 10K/50K/PlaceBet button coordinates for device {device_name} (counter: {match_counter}, should_match: {should_match})")
+                button_10k_coords, button_10k_error = find_button_coords(Path("samples/sample_10k.jpg"), "10K")
+                button_50k_coords, button_50k_error = find_button_coords(Path("samples/sample_50k.jpg"), "50K")
+                button_place_bet_coords, button_place_bet_error = find_button_coords(Path("samples/sample_place_bet_button.jpg"), "Nút Đặt Cược")
+            
+            # Lưu tọa độ vào database
+            # Nếu đã match 10K/50K/PlaceBet lần này, lưu tất cả (bao gồm cả Nút Cược và 1K mới match)
+            # Nếu skip match 10K/50K/PlaceBet, chỉ cần cập nhật Nút Cược và 1K mới match, giữ nguyên các button khác
+            if saved_coords and not should_match:
+                # Skip match: chỉ cập nhật Nút Cược và 1K, giữ nguyên các button khác từ saved_coords
+                coords_to_save = {
+                    'button_1k_coords': button_1k_coords,  # Luôn cập nhật 1K
+                    'button_10k_coords': saved_coords.get('button_10k_coords'),
+                    'button_50k_coords': saved_coords.get('button_50k_coords'),
+                    'button_bet_coords': button_bet_coords,  # Luôn cập nhật Nút Cược
+                    'button_place_bet_coords': saved_coords.get('button_place_bet_coords')
+                }
+            else:
+                # Đã match: lưu tất cả các button đã match
+                coords_to_save = {
+                    'button_1k_coords': button_1k_coords,  # Luôn cập nhật 1K
+                    'button_10k_coords': button_10k_coords,
+                    'button_50k_coords': button_50k_coords,
+                    'button_bet_coords': button_bet_coords,  # Luôn cập nhật Nút Cược
+                    'button_place_bet_coords': button_place_bet_coords
+                }
+            
+            # Chỉ lưu nếu có ít nhất 1 tọa độ
+            if any(coords_to_save.values()):
+                mobile_betting_service.save_device_button_coords(device_name, coords_to_save)
+                print(f"[BETTING] Saved button coordinates for device {device_name} - 1K: {coords_to_save['button_1k_coords']}, 10K: {coords_to_save['button_10k_coords']}, 50K: {coords_to_save['button_50k_coords']}, Bet: {coords_to_save['button_bet_coords']}, PlaceBet: {coords_to_save['button_place_bet_coords']}")
+
             mobile_betting_service.save_analysis_history(
                 {
                     "device_name": device_name,
@@ -1668,6 +1991,22 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                     "chatgpt_response": chatgpt_text,
                     "seconds_region_coords": seconds_region_coords,
                     "bet_region_coords": bet_amount_region_coords,
+                    "button_1k_coords": button_1k_coords,
+                    "button_1k_error": button_1k_error,
+                    "button_10k_coords": button_10k_coords,
+                    "button_10k_error": button_10k_error,
+                    "button_50k_coords": button_50k_coords,
+                    "button_50k_error": button_50k_error,
+                    "button_bet_coords": button_bet_coords,
+                    "button_bet_error": button_bet_error,
+                    "button_place_bet_coords": button_place_bet_coords,
+                    "button_place_bet_error": button_place_bet_error,
+                    "device_real_width": device_real_width,
+                    "device_real_height": device_real_height,
+                    "screenshot_width": screenshot_width,
+                    "screenshot_height": screenshot_height,
+                    "actual_image_width": actual_image_width,
+                    "actual_image_height": actual_image_height,
                 }
             )
 
@@ -1679,6 +2018,47 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 "image_type": "BETTING",
                 "seconds": seconds_value,  # Giá trị giây đọc được từ ChatGPT hoặc OCR
             }
+            
+            # Thêm tọa độ các button nếu tìm được, hoặc thông báo lỗi nếu không tìm được
+            if button_1k_coords:
+                response_data["button_1k_coords"] = {
+                    "x": button_1k_coords["x"],
+                    "y": button_1k_coords["y"]
+                }
+            elif button_1k_error:
+                response_data["button_1k_error"] = button_1k_error
+            
+            if button_10k_coords:
+                response_data["button_10k_coords"] = {
+                    "x": button_10k_coords["x"],
+                    "y": button_10k_coords["y"]
+                }
+            elif button_10k_error:
+                response_data["button_10k_error"] = button_10k_error
+            
+            if button_50k_coords:
+                response_data["button_50k_coords"] = {
+                    "x": button_50k_coords["x"],
+                    "y": button_50k_coords["y"]
+                }
+            elif button_50k_error:
+                response_data["button_50k_error"] = button_50k_error
+            
+            if button_bet_coords:
+                response_data["button_bet_coords"] = {
+                    "x": button_bet_coords["x"],
+                    "y": button_bet_coords["y"]
+                }
+            elif button_bet_error:
+                response_data["button_bet_error"] = button_bet_error
+            
+            if button_place_bet_coords:
+                response_data["button_place_bet_coords"] = {
+                    "x": button_place_bet_coords["x"],
+                    "y": button_place_bet_coords["y"]
+                }
+            elif button_place_bet_error:
+                response_data["button_place_bet_error"] = button_place_bet_error
 
         else:
             response_data = base_response_data.copy()
@@ -1721,10 +2101,18 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
 
 
 @app.get("/api/mobile/history")
-async def get_mobile_history(limit: int = 50):
+async def get_mobile_history(limit: int = 50, page: int = 1):
     try:
-        history = mobile_betting_service.get_analysis_history(limit=limit)
-        return {"success": True, "total": len(history), "history": history}
+        history, total_count = mobile_betting_service.get_analysis_history(limit=limit, page=page)
+        total_pages = (total_count + limit - 1) // limit if limit > 0 else 1
+        return {
+            "success": True,
+            "total": total_count,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "history": history
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Lá»—i láº¥y lá»‹ch sá»­: {exc}")
 
@@ -1736,7 +2124,10 @@ async def get_mobile_history_image(record_id: int, download: bool = Query(False)
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT image_path
+            SELECT image_path, button_1k_coords, button_10k_coords, button_50k_coords, 
+                   button_bet_coords, button_place_bet_coords, image_type, 
+                   device_real_width, device_real_height, screenshot_width, screenshot_height, 
+                   actual_image_width, actual_image_height
             FROM mobile_analysis_history
             WHERE id = ?
             """,
@@ -1746,11 +2137,103 @@ async def get_mobile_history_image(record_id: int, download: bool = Query(False)
         conn.close()
 
         if not row or not row[0]:
-            raise HTTPException(status_code=404, detail="KhÃ´ng tÃ¬m tháº¥y áº£nh")
+            raise HTTPException(status_code=404, detail="Không tìm thấy ảnh")
 
         image_path = row[0]
+        button_1k_coords_json = row[1]
+        button_10k_coords_json = row[2]
+        button_50k_coords_json = row[3]
+        button_bet_coords_json = row[4]
+        button_place_bet_coords_json = row[5]
+        image_type = row[6] if len(row) > 6 else None
+        device_real_width = row[7] if len(row) > 7 else None
+        device_real_height = row[8] if len(row) > 8 else None
+        screenshot_width = row[9] if len(row) > 9 else None
+        screenshot_height = row[10] if len(row) > 10 else None
+        saved_actual_image_width = row[11] if len(row) > 11 else None
+        saved_actual_image_height = row[12] if len(row) > 12 else None
+        
         if not os.path.exists(image_path):
-            raise HTTPException(status_code=404, detail=f"File áº£nh khÃ´ng tá»“n táº¡i: {image_path}")
+            raise HTTPException(status_code=404, detail=f"File ảnh không tồn tại: {image_path}")
+
+        # Vẽ khung viền cho BETTING images khi có button coordinates
+        if image_type == "BETTING":
+            try:
+                import json
+                from PIL import ImageDraw
+                
+                # Load ảnh
+                image = Image.open(image_path)
+                current_image_width = image.width
+                current_image_height = image.height
+                
+                # Dùng kích thước đã lưu hoặc kích thước hiện tại
+                actual_image_width = saved_actual_image_width if saved_actual_image_width else current_image_width
+                actual_image_height = saved_actual_image_height if saved_actual_image_height else current_image_height
+                
+                draw = ImageDraw.Draw(image)
+                box_size = 100  # Kích thước khung viền
+                
+                # Hàm helper để vẽ khung viền cho một button
+                def draw_button_box(coords_json, color, label):
+                    if not coords_json:
+                        return
+                    try:
+                        coords = json.loads(coords_json) if isinstance(coords_json, str) else coords_json
+                        if coords and isinstance(coords, dict) and "x" in coords and "y" in coords:
+                            device_x = coords.get("x", 0)
+                            device_y = coords.get("y", 0)
+                            
+                            # Scale từ device coordinates về image coordinates
+                            if device_real_width and device_real_height and actual_image_width and actual_image_height:
+                                image_x = int(device_x * (actual_image_width / device_real_width)) if device_real_width > 0 else device_x
+                                image_y = int(device_y * (actual_image_height / device_real_height)) if device_real_height > 0 else device_y
+                            else:
+                                image_x = device_x
+                                image_y = device_y
+                            
+                            # Vẽ khung viền
+                            box_x1 = max(0, image_x - box_size // 2)
+                            box_y1 = max(0, image_y - box_size // 2)
+                            box_x2 = min(actual_image_width, image_x + box_size // 2)
+                            box_y2 = min(actual_image_height, image_y + box_size // 2)
+                            
+                            # Vẽ khung viền dày 3 pixels
+                            for i in range(3):
+                                draw.rectangle([box_x1 - i, box_y1 - i, box_x2 + i, box_y2 + i], outline=color, width=1)
+                            
+                            # Vẽ label (tùy chọn)
+                            draw.text((box_x1, box_y1 - 15), label, fill=color)
+                    except Exception as e:
+                        print(f"Error drawing {label} button box: {e}")
+                
+                # Vẽ khung viền cho các button với màu khác nhau
+                draw_button_box(button_1k_coords_json, "red", "1K")
+                draw_button_box(button_10k_coords_json, "blue", "10K")
+                draw_button_box(button_50k_coords_json, "green", "50K")
+                draw_button_box(button_bet_coords_json, "orange", "Bet")
+                draw_button_box(button_place_bet_coords_json, "purple", "PlaceBet")
+                
+                # Lưu ảnh tạm vào BytesIO
+                import io
+                output = io.BytesIO()
+                image.save(output, format='JPEG', quality=95)
+                output.seek(0)
+                
+                extension = os.path.splitext(image_path)[1].lower()
+                media_type = {
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".png": "image/png",
+                    ".gif": "image/gif",
+                    ".webp": "image/webp",
+                }.get(extension, "image/jpeg")
+                
+                filename = os.path.basename(image_path) if download else None
+                return Response(content=output.read(), media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'} if filename else {})
+            except Exception as e:
+                print(f"Error drawing button boxes: {e}")
+                # Fallback: trả về ảnh gốc nếu có lỗi
 
         extension = os.path.splitext(image_path)[1].lower()
         media_type = {
@@ -1767,7 +2250,39 @@ async def get_mobile_history_image(record_id: int, download: bool = Query(False)
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Lá»—i láº¥y áº£nh: {exc}")
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy ảnh: {exc}")
+
+
+@app.get("/api/mobile/history/image-info/{record_id}")
+async def get_mobile_history_image_info(record_id: int):
+    """Lấy thông tin kích thước screenshot và device"""
+    try:
+        conn = sqlite3.connect("logs.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT actual_image_width, actual_image_height, device_real_width, device_real_height
+            FROM mobile_analysis_history
+            WHERE id = ?
+            """,
+            (record_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Không tìm thấy record")
+
+        return {
+            "actual_image_width": row[0],
+            "actual_image_height": row[1],
+            "device_real_width": row[2],
+            "device_real_height": row[3],
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy thông tin ảnh: {exc}")
 
 
 @app.get("/api/mobile/history/cropped-image/{record_id}")
@@ -1831,6 +2346,136 @@ async def get_mobile_history_cropped_image(record_id: int, download: bool = Quer
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Lỗi lấy ảnh crop: {exc}")
+
+
+def find_template_in_image(template_path: str, target_image: Image.Image, threshold: float = 0.4) -> Optional[Dict[str, int]]:
+    """
+    Tìm vùng ảnh template trong target image sử dụng template matching với multi-scale và nhiều phương pháp.
+    Trả về dict với keys: x, y, width, height, center_x, center_y, confidence
+    """
+    try:
+        if not Path(template_path).exists():
+            return None
+        
+        # Load template image
+        template = cv2.imread(template_path)
+        if template is None:
+            return None
+        
+        # Convert PIL Image to OpenCV format
+        target_array = np.array(target_image)
+        if len(target_array.shape) == 2:  # Grayscale
+            target_cv = cv2.cvtColor(target_array, cv2.COLOR_GRAY2BGR)
+        elif target_array.shape[2] == 4:  # RGBA
+            target_cv = cv2.cvtColor(target_array, cv2.COLOR_RGBA2BGR)
+        else:  # RGB
+            target_cv = cv2.cvtColor(target_array, cv2.COLOR_RGB2BGR)
+        
+        # Preprocessing để tăng độ chính xác
+        # 1. Convert sang grayscale để giảm nhiễu màu
+        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        target_gray = cv2.cvtColor(target_cv, cv2.COLOR_BGR2GRAY)
+        
+        # 2. Tăng contrast để làm nổi bật đặc điểm
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        template_gray = clahe.apply(template_gray)
+        target_gray = clahe.apply(target_gray)
+        
+        # 3. Gaussian blur nhẹ để giảm noise
+        template_gray = cv2.GaussianBlur(template_gray, (3, 3), 0)
+        target_gray = cv2.GaussianBlur(target_gray, (3, 3), 0)
+        
+        template_height, template_width = template_gray.shape[:2]
+        target_height, target_width = target_gray.shape[:2]
+        
+        # Nếu template lớn hơn target, không thể match
+        if template_width > target_width or template_height > target_height:
+            return None
+        
+        best_match = None
+        best_confidence = 0.0
+        best_method = None
+        
+        # Thử nhiều phương pháp template matching
+        methods = [
+            ('TM_CCOEFF_NORMED', cv2.TM_CCOEFF_NORMED),
+            ('TM_CCORR_NORMED', cv2.TM_CCORR_NORMED),
+            ('TM_SQDIFF_NORMED', cv2.TM_SQDIFF_NORMED),
+        ]
+        
+        # Thử multi-scale: scale template từ 0.5x đến 1.5x với bước nhỏ hơn để chính xác hơn
+        scales = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.45, 1.5]
+        
+        for scale in scales:
+            # Resize template
+            scaled_width = int(template_width * scale)
+            scaled_height = int(template_height * scale)
+            
+            if scaled_width > target_width or scaled_height > target_height:
+                continue
+            
+            scaled_template = cv2.resize(template_gray, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+            
+            # Thử từng phương pháp matching (sử dụng grayscale đã preprocessing)
+            for method_name, method in methods:
+                try:
+                    result = cv2.matchTemplate(target_gray, scaled_template, method)
+                    
+                    if method == cv2.TM_SQDIFF_NORMED:
+                        # Với SQDIFF, giá trị nhỏ hơn = tốt hơn
+                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                        confidence = 1.0 - min_val
+                        match_loc = min_loc
+                    else:
+                        # Với các method khác, giá trị lớn hơn = tốt hơn
+                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                        confidence = max_val
+                        match_loc = max_loc
+                    
+                    # Lưu match tốt nhất
+                    if confidence > best_confidence:
+                        best_confidence = confidence
+                        best_match = {
+                            "x": match_loc[0],
+                            "y": match_loc[1],
+                            "width": scaled_width,
+                            "height": scaled_height,
+                            "center_x": match_loc[0] + scaled_width // 2,
+                            "center_y": match_loc[1] + scaled_height // 2,
+                            "confidence": float(confidence),
+                            "scale": scale,
+                            "method": method_name
+                        }
+                except Exception as e:
+                    continue
+        
+        # Kiểm tra threshold và validation
+        if best_match and best_confidence >= threshold:
+            # Validation: Kiểm tra kích thước hợp lý (không quá nhỏ hoặc quá lớn)
+            scale_ratio = best_match.get('scale', 1.0)
+            if scale_ratio < 0.5 or scale_ratio > 1.5:
+                print(f"Template matching rejected: scale ratio {scale_ratio:.2f} out of valid range")
+                return None
+            
+            # Validation: Kiểm tra vị trí hợp lý (không nằm ngoài ảnh)
+            if (best_match["x"] < 0 or best_match["y"] < 0 or 
+                best_match["x"] + best_match["width"] > target_width or
+                best_match["y"] + best_match["height"] > target_height):
+                print(f"Template matching rejected: coordinates out of bounds")
+                return None
+            
+            print(f"Template matching success: confidence={best_confidence:.3f}, scale={best_match.get('scale', 1.0)}, method={best_match.get('method', 'unknown')}")
+            return best_match
+        else:
+            if best_match:
+                print(f"Template matching failed: best confidence={best_confidence:.3f} < threshold={threshold}")
+            return None
+            
+    except Exception as exc:
+        print(f"Error in template matching: {exc}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def load_betting_crop_region() -> Optional[Dict[str, int]]:
@@ -2080,9 +2725,14 @@ async def upload_sample_1k(file: UploadFile = File(...)):
         
         sample_path = samples_dir / "sample_1k.jpg"
         
+        # Xóa file cũ nếu tồn tại để đảm bảo replace
+        if sample_path.exists():
+            sample_path.unlink()
+        
         image_data = await file.read()
         with open(sample_path, "wb") as f:
             f.write(image_data)
+            f.flush()
         
         return {
             "success": True,
@@ -2102,9 +2752,14 @@ async def upload_sample_10k(file: UploadFile = File(...)):
         
         sample_path = samples_dir / "sample_10k.jpg"
         
+        # Xóa file cũ nếu tồn tại để đảm bảo replace
+        if sample_path.exists():
+            sample_path.unlink()
+        
         image_data = await file.read()
         with open(sample_path, "wb") as f:
             f.write(image_data)
+            f.flush()
         
         return {
             "success": True,
@@ -2124,9 +2779,14 @@ async def upload_sample_bet_button(file: UploadFile = File(...)):
         
         sample_path = samples_dir / "sample_bet_button.jpg"
         
+        # Xóa file cũ nếu tồn tại để đảm bảo replace
+        if sample_path.exists():
+            sample_path.unlink()
+        
         image_data = await file.read()
         with open(sample_path, "wb") as f:
             f.write(image_data)
+            f.flush()
         
         return {
             "success": True,
@@ -2146,13 +2806,45 @@ async def upload_sample_place_bet_button(file: UploadFile = File(...)):
         
         sample_path = samples_dir / "sample_place_bet_button.jpg"
         
+        # Xóa file cũ nếu tồn tại để đảm bảo replace
+        if sample_path.exists():
+            sample_path.unlink()
+        
         image_data = await file.read()
         with open(sample_path, "wb") as f:
             f.write(image_data)
+            f.flush()
         
         return {
             "success": True,
             "message": "Nút Đặt Cược sample image uploaded successfully",
+            "path": str(sample_path)
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
+
+
+@app.post("/api/mobile/sample-50k/upload")
+async def upload_sample_50k(file: UploadFile = File(...)):
+    """Upload or replace 50K sample image"""
+    try:
+        samples_dir = Path("samples")
+        samples_dir.mkdir(exist_ok=True)
+        
+        sample_path = samples_dir / "sample_50k.jpg"
+        
+        # Xóa file cũ nếu tồn tại để đảm bảo replace
+        if sample_path.exists():
+            sample_path.unlink()
+        
+        image_data = await file.read()
+        with open(sample_path, "wb") as f:
+            f.write(image_data)
+            f.flush()
+        
+        return {
+            "success": True,
+            "message": "50K sample image uploaded successfully",
             "path": str(sample_path)
         }
     except Exception as exc:
@@ -2181,6 +2873,21 @@ async def get_sample_10k():
         sample_path = Path("samples/sample_10k.jpg")
         if not sample_path.exists():
             raise HTTPException(status_code=404, detail="10K sample image not found")
+        
+        return FileResponse(sample_path, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting sample: {exc}")
+
+
+@app.get("/api/mobile/sample-50k")
+async def get_sample_50k():
+    """Get 50K sample image"""
+    try:
+        sample_path = Path("samples/sample_50k.jpg")
+        if not sample_path.exists():
+            raise HTTPException(status_code=404, detail="50K sample image not found")
         
         return FileResponse(sample_path, media_type="image/jpeg")
     except HTTPException:
@@ -2246,10 +2953,50 @@ async def download_mobile_history_json(record_id: int):
         image_type = record.get("image_type")
 
         if image_type == "BETTING":
+            # Helper function để parse coords từ JSON string
+            def parse_coords(coords_str):
+                if coords_str:
+                    try:
+                        return json.loads(coords_str)
+                    except Exception:
+                        pass
+                return None
+            
             payload: Dict[str, Any] = {
                 **base_payload,
                 "seconds": record.get("seconds_remaining"),
             }
+            
+            # Parse và thêm tọa độ các button nếu có
+            button_1k_coords = parse_coords(record.get("button_1k_coords"))
+            if button_1k_coords:
+                payload["button_1k_coords"] = button_1k_coords
+            elif record.get("button_1k_error"):
+                payload["button_1k_error"] = record.get("button_1k_error")
+            
+            button_10k_coords = parse_coords(record.get("button_10k_coords"))
+            if button_10k_coords:
+                payload["button_10k_coords"] = button_10k_coords
+            elif record.get("button_10k_error"):
+                payload["button_10k_error"] = record.get("button_10k_error")
+            
+            button_50k_coords = parse_coords(record.get("button_50k_coords"))
+            if button_50k_coords:
+                payload["button_50k_coords"] = button_50k_coords
+            elif record.get("button_50k_error"):
+                payload["button_50k_error"] = record.get("button_50k_error")
+            
+            button_bet_coords = parse_coords(record.get("button_bet_coords"))
+            if button_bet_coords:
+                payload["button_bet_coords"] = button_bet_coords
+            elif record.get("button_bet_error"):
+                payload["button_bet_error"] = record.get("button_bet_error")
+            
+            button_place_bet_coords = parse_coords(record.get("button_place_bet_coords"))
+            if button_place_bet_coords:
+                payload["button_place_bet_coords"] = button_place_bet_coords
+            elif record.get("button_place_bet_error"):
+                payload["button_place_bet_error"] = record.get("button_place_bet_error")
         elif image_type == "HISTORY":
             # Parse tien_thang từ chatgpt_response nếu có
             tien_thang_value = None
