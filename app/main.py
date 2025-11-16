@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any, Union
 from pathlib import Path
 from datetime import datetime
+import asyncio
 import base64
 import io
 import json
@@ -18,9 +19,6 @@ import pytesseract
 from pytesseract import TesseractNotFoundError
 import numpy as np
 import cv2
-from azure.cognitiveservices.vision.computervision import ComputerVisionClient
-from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
-from msrest.authentication import CognitiveServicesCredentials
 
 from .services.mobile_betting_service import mobile_betting_service
 
@@ -86,129 +84,6 @@ def get_openai_api_key() -> str:
                     return value
     raise HTTPException(status_code=500, detail="OPENAI_API_KEY chÆ°a Ä'Æ°á»£c cáº¥u hÃ¬nh")
 
-def get_azure_vision_key() -> str:
-    """Lấy Azure Computer Vision API key từ environment variable"""
-    import os
-    key = os.getenv("AZURE_VISION_KEY")
-    if key:
-        return key
-    # Fallback: đọc từ file config nếu có
-    config_path = Path("config.py")
-    if config_path.exists():
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("config", config_path)
-        config = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(config)
-        if hasattr(config, "AZURE_VISION_KEY") and config.AZURE_VISION_KEY:
-            return config.AZURE_VISION_KEY
-    raise HTTPException(status_code=500, detail="AZURE_VISION_KEY chưa được cấu hình")
-
-def get_azure_vision_endpoint() -> str:
-    """Lấy Azure Computer Vision endpoint"""
-    # Endpoint mặc định cho Azure Computer Vision
-    return "https://southeastasia.api.cognitive.microsoft.com/"
-
-async def read_text_with_azure(image: Image.Image) -> Dict[str, Any]:
-    """Đọc text từ ảnh bằng Azure Computer Vision OCR
-    
-    Returns:
-        Dict chứa các field đọc được với prefix AZR_
-    """
-    try:
-        # Convert PIL Image to bytes
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='PNG')
-        img_byte_arr.seek(0)
-        image_data = img_byte_arr.read()
-        
-        # Initialize Azure Computer Vision client
-        endpoint = get_azure_vision_endpoint()
-        key = get_azure_vision_key()
-        credentials = CognitiveServicesCredentials(key)
-        client = ComputerVisionClient(endpoint, credentials)
-        
-        # Call OCR API
-        ocr_result = client.read_in_stream(io.BytesIO(image_data), raw=True)
-        
-        # Get operation location
-        operation_location = ocr_result.headers["Operation-Location"]
-        operation_id = operation_location.split("/")[-1]
-        
-        # Wait for operation to complete
-        import time
-        while True:
-            result = client.get_read_result(operation_id)
-            if result.status not in ['notStarted', 'running']:
-                break
-            time.sleep(0.5)
-        
-        # Parse results
-        azure_data = {}
-        if result.status == OperationStatusCodes.succeeded:
-            if result.analyze_result.read_results:
-                all_text = []
-                for read_result in result.analyze_result.read_results:
-                    if read_result.lines:
-                        for line in read_result.lines:
-                            if line.text:
-                                all_text.append(line.text)
-                
-                # Combine all text
-                full_text = " ".join(all_text)
-                azure_data["AZR_full_text"] = full_text
-                
-                # Try to extract common fields
-                # Extract session ID
-                session_match = re.search(r'#?(\d+)', full_text)
-                if session_match:
-                    azure_data["AZR_session_id"] = session_match.group(1)
-                
-                # Extract numbers (could be bet amount, winnings, etc.)
-                numbers = re.findall(r'[\d,]+', full_text)
-                if numbers:
-                    azure_data["AZR_numbers"] = numbers
-                
-                # Extract bet amount patterns
-                bet_patterns = [
-                    r'Tiền cược[:\s]+([\d,]+)',
-                    r'Cược[:\s]+([\d,]+)',
-                    r'Bet[:\s]+([\d,]+)',
-                ]
-                for pattern in bet_patterns:
-                    match = re.search(pattern, full_text, re.IGNORECASE)
-                    if match:
-                        azure_data["AZR_bet_amount"] = match.group(1).replace(",", "")
-                        break
-                
-                # Extract winnings amount patterns
-                winnings_patterns = [
-                    r'Tiền thắng[:\s]+([+-]?[\d,]+)',
-                    r'Winnings[:\s]+([+-]?[\d,]+)',
-                    r'Thắng[:\s]+([+-]?[\d,]+)',
-                ]
-                for pattern in winnings_patterns:
-                    match = re.search(pattern, full_text, re.IGNORECASE)
-                    if match:
-                        azure_data["AZR_winnings_amount"] = match.group(1).replace(",", "")
-                        break
-                
-                # Extract win/loss indicators
-                if re.search(r'thắng|win|green', full_text, re.IGNORECASE):
-                    azure_data["AZR_win_loss"] = "win"
-                elif re.search(r'thua|loss|red', full_text, re.IGNORECASE):
-                    azure_data["AZR_win_loss"] = "loss"
-                
-                # Extract column 5 (Đặt/Kết quả)
-                dat_ket_qua_match = re.search(r'Đặt\s*:?\s*([^,\.]+?)(?:\s*,\s*|\s*\.\s*)Kết quả\s*:?\s*([^,\.]+)', full_text, re.IGNORECASE)
-                if dat_ket_qua_match:
-                    azure_data["AZR_dat"] = dat_ket_qua_match.group(1).strip()
-                    azure_data["AZR_ket_qua"] = dat_ket_qua_match.group(2).strip()
-                    azure_data["AZR_column_5"] = f"Đặt {azure_data['AZR_dat']}, Kết quả {azure_data['AZR_ket_qua']}"
-        
-        return azure_data
-    except Exception as e:
-        print(f"Error reading text with Azure: {e}")
-        return {}
 
 
 @app.get("/", include_in_schema=False)
@@ -1573,8 +1448,6 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
         is_history = image_type_hint == "HISTORY"
         is_betting = image_type_hint == "BETTING"
         
-        # Khởi tạo azure_ocr_data để dùng sau
-        azure_ocr_data = {}
 
         # Bước 2: Sau khi biết loại screenshot, crop theo template tương ứng và gửi API call ngay
         cropped_region_info = None
@@ -1617,9 +1490,6 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             
             # Gửi ảnh đã crop cho ChatGPT để đọc nội dung chi tiết
             chatgpt_text, parsed_response = await send_detail_analysis(history_detail_prompt, cropped_image)
-            
-            # Đọc text bằng Azure OCR cho HISTORY screen
-            azure_ocr_data = await read_text_with_azure(cropped_image)
         
         elif is_betting:
             # Crop theo BETTING template nếu có
@@ -1655,23 +1525,6 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             
             # Gửi ảnh đã crop cho ChatGPT để đọc nội dung chi tiết
             chatgpt_text, parsed_response = await send_detail_analysis(betting_detail_prompt, cropped_image)
-            
-            # Đọc text bằng Azure OCR cho BETTING screen
-            azure_ocr_data = await read_text_with_azure(cropped_image)
-            
-            # Extract số giây từ Azure OCR text (số 1-2 chữ số từ 1-60)
-            azr_seconds = None
-            if azure_ocr_data.get("AZR_full_text"):
-                full_text = azure_ocr_data["AZR_full_text"]
-                # Tìm số 1-2 chữ số từ 1-60 trong text
-                # Loại bỏ các số lớn hơn 2 chữ số (số tiền)
-                numbers = re.findall(r'\b(\d{1,2})\b', full_text)
-                for num_str in numbers:
-                    num = int(num_str)
-                    if 1 <= num <= 60:
-                        azr_seconds = num
-                        break
-                azure_ocr_data["AZR_seconds"] = azr_seconds
 
         base_response_data = {
             "device_name": device_name,
@@ -2015,7 +1868,6 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                     "chatgpt_response": chatgpt_text,
                     "seconds_region_coords": seconds_region_coords,
                     "bet_region_coords": bet_amount_region_coords,
-                    "azure_ocr_response": json.dumps(azure_ocr_data) if azure_ocr_data else None,
                 }
             )
 
@@ -2032,9 +1884,6 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 "column_5": column_5,  # Nội dung cột thứ 5 (bên phải cột Tiền thắng)
             }
             
-            # Thêm dữ liệu từ Azure OCR vào response
-            if azure_ocr_data:
-                response_data.update(azure_ocr_data)
 
         elif is_betting:
             # Ưu tiên lấy seconds từ ChatGPT response
@@ -2175,7 +2024,6 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                     "multiplier": None,
                     "image_path": saved_path,
                     "chatgpt_response": chatgpt_text,
-                    "azure_ocr_response": json.dumps(azure_ocr_data) if azure_ocr_data else None,
                     "seconds_region_coords": seconds_region_coords,
                     "bet_region_coords": bet_amount_region_coords,
                     "button_1k_coords": button_1k_coords,
@@ -2206,9 +2054,6 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 "seconds": seconds_value,  # Giá trị giây đọc được từ ChatGPT hoặc OCR
             }
             
-            # Thêm dữ liệu từ Azure OCR vào response
-            if azure_ocr_data:
-                response_data.update(azure_ocr_data)
             
             # Thêm tọa độ các button nếu tìm được, hoặc thông báo lỗi nếu không tìm được
             if button_1k_coords:
@@ -3189,15 +3034,6 @@ async def download_mobile_history_json(record_id: int):
             elif record.get("button_place_bet_error"):
                 payload["button_place_bet_error"] = record.get("button_place_bet_error")
         elif image_type == "HISTORY":
-            # Parse Azure OCR data nếu có
-            azure_ocr_response = record.get("azure_ocr_response")
-            azure_ocr_data = {}
-            if azure_ocr_response:
-                try:
-                    azure_ocr_data = json.loads(azure_ocr_response)
-                except Exception:
-                    pass
-            
             # Parse tien_thang từ chatgpt_response nếu có
             tien_thang_value = None
             winnings_color_value = None
@@ -3281,9 +3117,6 @@ async def download_mobile_history_json(record_id: int):
             filtered_payload["winnings_color"] = winnings_color_val
             filtered_payload["column_5"] = column_5_val
             
-            # Thêm dữ liệu Azure OCR vào payload
-            if azure_ocr_data:
-                filtered_payload.update(azure_ocr_data)
 
         return filtered_payload
 
