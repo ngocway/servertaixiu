@@ -109,6 +109,8 @@ class MobileBettingService:
             cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN actual_image_width INTEGER")
         if 'actual_image_height' not in existing_columns:
             cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN actual_image_height INTEGER")
+        if 'azure_ocr_response' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN azure_ocr_response TEXT")
         
         # Table lưu chi tiết verification logs
         cursor.execute("""
@@ -316,8 +318,9 @@ class MobileBettingService:
              seconds_region_coords, bet_region_coords, button_1k_coords, button_1k_error,
              button_10k_coords, button_10k_error, button_50k_coords, button_50k_error, button_bet_coords, button_bet_error,
              button_place_bet_coords, button_place_bet_error,
-             device_real_width, device_real_height, screenshot_width, screenshot_height, actual_image_width, actual_image_height)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             device_real_width, device_real_height, screenshot_width, screenshot_height, actual_image_width, actual_image_height,
+             azure_ocr_response)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             record.get('device_name'),
             record.get('betting_method'),
@@ -348,7 +351,8 @@ class MobileBettingService:
             record.get('screenshot_width'),
             record.get('screenshot_height'),
             record.get('actual_image_width'),
-            record.get('actual_image_height')
+            record.get('actual_image_height'),
+            record.get('azure_ocr_response')
         ))
         
         conn.commit()
