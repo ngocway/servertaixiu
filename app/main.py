@@ -1296,13 +1296,14 @@ async def mobile_analyze(
     * Neu mau text gan voi mau DO (red, #FF0000, rgb(255,0,0), hoac mau tuong tu) -> gan "winnings_color" = "red".
     * Neu mau text gan voi mau XANH LA CAY (green, #00FF00, rgb(0,255,0), hoac mau tuong tu) -> gan "winnings_color" = "green".
     * Neu khong phai mau do hoac xanh la cay -> gan "winnings_color" = null.
-- Doc NOI DUNG o COT THU 5 (cot ben phai cot "Tiền thắng") cua DONG DAU TIEN va gan vao khoa "column_5". 
-    * Cot thu 5 thường chứa thông tin về "Đặt" và "Kết quả", ví dụ: "Đặt Tài, Kết quả Tài" hoặc "Đặt Xỉu, Kết quả Xỉu".
-    * Neu co thong tin "Đặt" va "Kết quả", hay doc day du va gan vao "column_5" theo format: "Đặt <gia_tri>, Kết quả <gia_tri>" (vi du: "Đặt Tài, Kết quả Tài" hoac "Đặt Xỉu, Kết quả Xỉu").
-    * Neu khong co thong tin "Đặt" va "Kết quả", hay doc toan bo noi dung cua cot thu 5 va gan vao "column_5".
+- Doc TOAN BO NOI DUNG TEXT trong anh da crop va gan vao khoa "column_5". 
+    * Hay doc HET TOAN BO text hien thi trong anh, bao gom: "Đặt", "Kết quả", "Tổng đặt", "Hoàn trả" va cac gia tri tuong ung.
+    * Format: "Đặt <gia_tri>. Kết quả <gia_tri>. Tổng đặt <so_tien>. Hoàn trả <so_tien>."
+    * Vi du: "Đặt Tài. Kết quả Tài. Tổng đặt 1,200,000. Hoàn trả 0."
+    * Neu khong doc duoc day du, hay doc toan bo text co trong anh va gan vao "column_5".
 - Lay so phien o cot "Phiên" (cot thu 1) cua DONG DAU TIEN lam gia tri cho khoa "Id" (bo ky tu "#" neu co).
 
-Tra ve dung JSON: {"Id":"<ma phien>","bet_amount":<so tien>,"winnings_amount":<so tien thang/thua hoac null>,"winnings_color":<"red"|"green"|null>,"column_5":"<noi dung cot thu 5>"}.
+Tra ve dung JSON: {"Id":"<ma phien>","bet_amount":<so tien>,"winnings_amount":<so tien thang/thua hoac null>,"winnings_color":<"red"|"green"|null>,"column_5":"<TOAN BO NOI DUNG TEXT DOC DUOC TU ANH>"}.
 
 CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
 
@@ -3132,47 +3133,34 @@ async def download_mobile_history_json(record_id: int):
                     if winnings_color_match:
                         winnings_color_value = winnings_color_match.group(1).lower()
                     
-                    # Parse column_5 - ưu tiên lấy toàn bộ nội dung từ parsed JSON hoặc raw text
-                    # Nếu có trong parsed JSON, lấy từ đó
+                    # Parse column_5 - ưu tiên lấy toàn bộ nội dung từ parsed JSON
+                    # Với prompt mới, ChatGPT sẽ trả về toàn bộ text đọc được trong column_5
                     column_5_value = parsed.get("column_5")
                     
-                    # Nếu không có, tìm trong text với nhiều pattern
+                    # Nếu không có trong parsed JSON, tìm trong text với nhiều pattern
                     if not column_5_value:
                         column_5_match = re.search(r'"column_5"\s*:\s*"([^"]*)"', chatgpt_response)
                         if column_5_match:
                             column_5_value = column_5_match.group(1)
                     
-                    # Nếu vẫn không có, thử lấy toàn bộ nội dung đọc được từ ảnh
-                    # Tìm phần mô tả nội dung trong chatgpt_response
+                    # Nếu vẫn không có, thử tìm pattern mô tả toàn bộ nội dung
+                    # Ví dụ: "Đặt Tài. Kết quả Tài. Tổng đặt 1,200,000. Hoàn trả 0."
                     if not column_5_value or column_5_value in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>"]:
-                        # Tìm phần mô tả chi tiết trong response
-                        # Ví dụ: "Đặt Xiu. Kết quả: Tài. Tổng đặt 64,000. Hoàn trả 0."
-                        detail_patterns = [
-                            r'Đặt\s+[^\.]+\.\s*Kết quả[^\.]+\.\s*Tổng đặt[^\.]+\.\s*Hoàn trả[^\.]+\.',
-                            r'Đặt\s+[^\.]+\.\s*Kết quả[^\.]+\.',
-                            r'Đặt[^\.]+Kết quả[^\.]+',
-                            r'column_5[^"]*"([^"]+)"',
-                        ]
-                        for pattern in detail_patterns:
-                            detail_match = re.search(pattern, chatgpt_response, re.IGNORECASE | re.DOTALL)
-                            if detail_match:
-                                column_5_value = detail_match.group(0) if detail_match.groups() == () else detail_match.group(1)
-                                break
-                        
-                        # Nếu vẫn không tìm thấy pattern cụ thể, thử lấy toàn bộ text mô tả từ ChatGPT
-                        # (phần text không nằm trong JSON)
-                        if not column_5_value or column_5_value in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>"]:
-                            # Tách phần JSON và phần text mô tả
-                            json_start = chatgpt_response.find('{')
-                            json_end = chatgpt_response.rfind('}')
-                            if json_start != -1 and json_end != -1:
-                                # Lấy phần text trước và sau JSON
-                                text_before = chatgpt_response[:json_start].strip()
-                                text_after = chatgpt_response[json_end+1:].strip()
-                                # Kết hợp lại để lấy toàn bộ mô tả
-                                full_description = (text_before + " " + text_after).strip()
-                                if full_description and len(full_description) > 10:  # Chỉ lấy nếu có nội dung đáng kể
-                                    column_5_value = full_description
+                        # Tìm pattern đầy đủ: Đặt ... Kết quả ... Tổng đặt ... Hoàn trả ...
+                        full_pattern = r'Đặt\s+[^\.]+\.\s*Kết quả[^:\.]+[:\s]+[^\.]+\.\s*Tổng\s+đặt[^\.]+\.\s*Hoàn trả[^\.]+\.'
+                        full_match = re.search(full_pattern, chatgpt_response, re.IGNORECASE | re.DOTALL)
+                        if full_match:
+                            column_5_value = full_match.group(0).strip()
+                        else:
+                            # Tìm pattern ngắn hơn: Đặt ... Kết quả ...
+                            short_pattern = r'Đặt\s+[^\.]+\.\s*Kết quả[^:\.]+[:\s]+[^\.]+\.'
+                            short_match = re.search(short_pattern, chatgpt_response, re.IGNORECASE | re.DOTALL)
+                            if short_match:
+                                column_5_value = short_match.group(0).strip()
+                    
+                    # Loại bỏ các giá trị placeholder
+                    if column_5_value in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>", ""]:
+                        column_5_value = None
                     
                     # Parse win_loss từ column_5 nếu có
                     if column_5_value:
