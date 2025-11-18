@@ -2082,10 +2082,94 @@ async def get_mobile_history(limit: int = 50, page: int = 1):
     try:
         history, total_count = mobile_betting_service.get_analysis_history(limit=limit, page=page)
         
-        # Convert win_loss từ label sang token để nhất quán với JSON endpoint
+        # Parse lại win_loss từ chatgpt_response cho các record HISTORY
+        # để đảm bảo giá trị khớp với JSON endpoint
+        conn = sqlite3.connect("logs.db")
+        cursor = conn.cursor()
+        
         for record in history:
-            if record.get('win_loss'):
-                record['win_loss'] = win_token_from_label(record['win_loss']) or record['win_loss']
+            if record.get('image_type') == 'HISTORY':
+                record_id = record.get('id')
+                if record_id:
+                    # Lấy chatgpt_response từ database
+                    cursor.execute(
+                        "SELECT chatgpt_response FROM mobile_analysis_history WHERE id = ?",
+                        (record_id,)
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        chatgpt_response = row[0]
+                        try:
+                            # Parse JSON từ chatgpt_response
+                            def parse_json_payload(raw_text: str) -> Dict[str, Any]:
+                                if not raw_text:
+                                    return {}
+                                cleaned = raw_text.strip()
+                                start = cleaned.find('{')
+                                end = cleaned.rfind('}')
+                                if start != -1 and end != -1 and end >= start:
+                                    cleaned = cleaned[start : end + 1]
+                                try:
+                                    return json.loads(cleaned)
+                                except json.JSONDecodeError:
+                                    return {}
+                                except Exception:
+                                    return {}
+                            
+                            parsed = parse_json_payload(chatgpt_response)
+                            
+                            # Lấy column_5 từ parsed JSON
+                            column_5_value = parsed.get("column_5")
+                            if not column_5_value:
+                                column_5_match = re.search(r'"column_5"\s*:\s*"([^"]*)"', chatgpt_response)
+                                if column_5_match:
+                                    column_5_value = column_5_match.group(1)
+                            
+                            # Parse win_loss từ column_5 nếu có
+                            if column_5_value and column_5_value not in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>", ""]:
+                                def parse_dat_ket_qua(column_5_text: str) -> tuple:
+                                    """Parse 'Đặt' và 'Kết quả' từ column_5"""
+                                    if not column_5_text:
+                                        return (None, None)
+                                    column_5_text = str(column_5_text).strip()
+                                    dat_value = None
+                                    ket_qua_value = None
+                                    
+                                    dat_match = re.search(r'Đặt\s*:?\s*([^,\.]+?)(?=[,\.]|\s*Kết quả|$)', column_5_text, re.IGNORECASE)
+                                    if dat_match:
+                                        dat_value = dat_match.group(1).strip()
+                                    
+                                    ket_qua_match = re.search(r'Kết quả\s*:?\s*([^,\.]+)', column_5_text, re.IGNORECASE)
+                                    if ket_qua_match:
+                                        ket_qua_value = ket_qua_match.group(1).strip()
+                                    
+                                    return (dat_value, ket_qua_value)
+                                
+                                dat_value, ket_qua_value = parse_dat_ket_qua(column_5_value)
+                                if dat_value and ket_qua_value:
+                                    dat_normalized = normalize_choice(dat_value)
+                                    ket_qua_normalized = normalize_choice(ket_qua_value)
+                                    if dat_normalized and ket_qua_normalized:
+                                        if dat_normalized == ket_qua_normalized:
+                                            record['win_loss'] = "win"
+                                        else:
+                                            record['win_loss'] = "loss"
+                        except Exception as e:
+                            # Nếu parse thất bại, dùng giá trị từ database
+                            pass
+                
+                # Convert win_loss từ label sang token nếu chưa phải token
+                if record.get('win_loss'):
+                    win_loss_token = win_token_from_label(record['win_loss'])
+                    if win_loss_token:
+                        record['win_loss'] = win_loss_token
+                    elif record['win_loss'].lower() not in ['win', 'loss', 'unknown']:
+                        # Nếu không phải token và không phải label đã biết, set thành unknown
+                        record['win_loss'] = "unknown"
+                else:
+                    record['win_loss'] = "unknown"
+        
+        conn.close()
         
         total_pages = (total_count + limit - 1) // limit if limit > 0 else 1
         return {
