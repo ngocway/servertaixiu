@@ -896,6 +896,18 @@ class MobileBettingService:
             'best_template_method': row[6] if row[6] else None
         }
     
+    def save_best_template_method(self, device_name: str, method: str):
+        """Lưu method tốt nhất cho device"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE device_button_coords
+            SET best_template_method = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE device_name = ?
+        """, (method, device_name))
+        conn.commit()
+        conn.close()
+    
     def should_match_buttons(self, device_name: str) -> Tuple[bool, int]:
         """
         Kiểm tra xem có nên match button lần này không (mỗi 10 screenshot BETTING match 1 lần)
