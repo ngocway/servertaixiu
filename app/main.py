@@ -1734,8 +1734,14 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             # Chỉ chạy template matching nếu seconds trong khoảng 34-49
             should_run_template_matching = (seconds_value >= 34 and seconds_value <= 49)
             
-            # Lấy method tốt nhất cho device (nếu có)
-            best_method = saved_coords.get('best_template_method') if saved_coords else None
+            # Lấy method tốt nhất cho device từ database
+            # Nếu device đã từng lưu best_template_method thì dùng lại, nếu chưa thì để None (sẽ thử tất cả methods)
+            best_method = None
+            if saved_coords and saved_coords.get('best_template_method'):
+                best_method = saved_coords.get('best_template_method')
+                print(f"[BETTING] Using saved best template method for device {device_name}: {best_method}")
+            else:
+                print(f"[BETTING] No saved best template method for device {device_name}, will try all methods to find best one")
             
             # Hàm helper để tìm và tính tọa độ cho một loại button
             def find_button_coords(sample_path: Path, button_name: str, is_first_match: bool = False):
