@@ -3250,13 +3250,17 @@ async def download_mobile_history_json(record_id: int):
         filtered_payload = {k: v for k, v in payload.items() if v is not None}
         # Thêm lại các field quan trọng vào cuối (LUÔN thêm, kể cả khi None)
         if image_type == "HISTORY":
-            # Đảm bảo luôn có các field này trong JSON, ngay cả khi None (sẽ hiển thị null)
-            filtered_payload["tien_thang"] = tien_thang_val
-            filtered_payload["winnings_amount"] = winnings_amount_val
-            filtered_payload["winnings_color"] = winnings_color_val
-            filtered_payload["column_5"] = column_5_val
-            filtered_payload["return"] = return_val
-            
+            # Đảm bảo luôn có các field này trong JSON, thay null bằng "unknown"
+            filtered_payload["tien_thang"] = tien_thang_val if tien_thang_val is not None else "unknown"
+            filtered_payload["winnings_amount"] = winnings_amount_val if winnings_amount_val is not None else "unknown"
+            filtered_payload["winnings_color"] = winnings_color_val if winnings_color_val is not None else "unknown"
+            filtered_payload["column_5"] = column_5_val if column_5_val is not None else "unknown"
+            filtered_payload["return"] = return_val if return_val is not None else "unknown"
+        
+        # Thay thế tất cả giá trị None trong filtered_payload bằng "unknown"
+        for key, value in filtered_payload.items():
+            if value is None:
+                filtered_payload[key] = "unknown"
 
         return filtered_payload
 
@@ -3750,18 +3754,21 @@ Trả về CHỈ JSON, không có text thêm."""
             except (ValueError, AttributeError):
                 pass
         
-        return {
-            "win_loss": win_loss,
-            "bet_amount": bet_amount,
-            "return": return_value,
+        # Thay thế tất cả giá trị None bằng "unknown"
+        result = {
+            "win_loss": win_loss if win_loss else "unknown",
+            "bet_amount": bet_amount if bet_amount != "unknown" else "unknown",
+            "return": return_value if return_value != "unknown" else "unknown",
             "raw_data": {
-                "dat": dat_value,
-                "ket_qua": ket_qua_value,
-                "tong_dat": tong_dat_str,
-                "hoan_tra": hoan_tra_str,
+                "dat": dat_value if dat_value else "unknown",
+                "ket_qua": ket_qua_value if ket_qua_value else "unknown",
+                "tong_dat": tong_dat_str if tong_dat_str else "unknown",
+                "hoan_tra": hoan_tra_str if hoan_tra_str else "unknown",
             },
-            "chatgpt_response": chatgpt_text,
+            "chatgpt_response": chatgpt_text if chatgpt_text else "unknown",
         }
+        
+        return result
     
     except HTTPException:
         raise
