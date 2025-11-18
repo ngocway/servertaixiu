@@ -1769,9 +1769,11 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                                 "y": device_y,
                                 "confidence": template_match_result.get("confidence", 0.0),
                                 "template_match_x": image_center_x,  # Tọa độ template match gốc (image coordinates)
-                                "template_match_y": image_center_y
+                                "template_match_y": image_center_y,
+                                "scale": template_match_result.get("scale", 1.0),  # Scale có confidence cao nhất
+                                "method": template_match_result.get("method", "unknown")  # Method có confidence cao nhất
                             }
-                            print(f"Found {button_name} button at device coordinates: ({device_x}, {device_y}), template match: ({image_center_x}, {image_center_y}), confidence: {template_match_result.get('confidence', 0.0):.2f}")
+                            print(f"Found {button_name} button at device coordinates: ({device_x}, {device_y}), template match: ({image_center_x}, {image_center_y}), confidence: {template_match_result.get('confidence', 0.0):.2f}, scale: {template_match_result.get('scale', 1.0):.2f}, method: {template_match_result.get('method', 'unknown')}")
                         else:
                             error = f"Không tìm thấy ảnh {button_name} trong screenshot BETTING. Template matching không khớp (confidence < 0.5). Kiểm tra lại ảnh mẫu {button_name} hoặc screenshot."
                     except Exception as exc:
@@ -1912,7 +1914,10 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             if button_1k_coords:
                 response_data["button_1k_coords"] = {
                     "x": button_1k_coords["x"],
-                    "y": button_1k_coords["y"]
+                    "y": button_1k_coords["y"],
+                    "confidence": button_1k_coords.get("confidence", 0.0),
+                    "scale": button_1k_coords.get("scale", 1.0),
+                    "method": button_1k_coords.get("method", "unknown")
                 }
             elif button_1k_error:
                 response_data["button_1k_error"] = button_1k_error
@@ -1920,7 +1925,10 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             if button_10k_coords:
                 response_data["button_10k_coords"] = {
                     "x": button_10k_coords["x"],
-                    "y": button_10k_coords["y"]
+                    "y": button_10k_coords["y"],
+                    "confidence": button_10k_coords.get("confidence", 0.0),
+                    "scale": button_10k_coords.get("scale", 1.0),
+                    "method": button_10k_coords.get("method", "unknown")
                 }
             elif button_10k_error:
                 response_data["button_10k_error"] = button_10k_error
@@ -1928,7 +1936,10 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             if button_50k_coords:
                 response_data["button_50k_coords"] = {
                     "x": button_50k_coords["x"],
-                    "y": button_50k_coords["y"]
+                    "y": button_50k_coords["y"],
+                    "confidence": button_50k_coords.get("confidence", 0.0),
+                    "scale": button_50k_coords.get("scale", 1.0),
+                    "method": button_50k_coords.get("method", "unknown")
                 }
             elif button_50k_error:
                 response_data["button_50k_error"] = button_50k_error
@@ -1936,7 +1947,10 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             if button_bet_coords:
                 response_data["button_bet_coords"] = {
                     "x": button_bet_coords["x"],
-                    "y": button_bet_coords["y"]
+                    "y": button_bet_coords["y"],
+                    "confidence": button_bet_coords.get("confidence", 0.0),
+                    "scale": button_bet_coords.get("scale", 1.0),
+                    "method": button_bet_coords.get("method", "unknown")
                 }
             elif button_bet_error:
                 response_data["button_bet_error"] = button_bet_error
@@ -1944,7 +1958,10 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             if button_place_bet_coords:
                 response_data["button_place_bet_coords"] = {
                     "x": button_place_bet_coords["x"],
-                    "y": button_place_bet_coords["y"]
+                    "y": button_place_bet_coords["y"],
+                    "confidence": button_place_bet_coords.get("confidence", 0.0),
+                    "scale": button_place_bet_coords.get("scale", 1.0),
+                    "method": button_place_bet_coords.get("method", "unknown")
                 }
             elif button_place_bet_error:
                 response_data["button_place_bet_error"] = button_place_bet_error
