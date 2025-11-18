@@ -1301,15 +1301,6 @@ async def mobile_analyze(
 
 - Chi doc DONG DAU TIEN cua bang (phien moi nhat nam tren cung, dong dau tien trong bang).
 - Doc gia tri o cot "Tổng cược" (cot thu 3) cua DONG DAU TIEN va gan vao khoa "bet_amount" duoi dang so nguyen (bo dau phan cach nghin, vi du: "1,000" -> 1000, "4,000" -> 4000).
-- Doc gia tri o cot "Tiền thắng" (cot thu 4) cua DONG DAU TIEN:
-    * Neu cot "Tiền thắng" hien thi dau gach ngang "-" (khong co so) -> gan "winnings_amount" = null.
-    * Neu cot "Tiền thắng" hien thi so duong (co dau + hoac khong, vi du: "+980", "+3,920", "980") -> lay so nguyen (bo dau + va dau phan cach nghin) va gan vao "winnings_amount" NHUNG GIU NGUYEN DAU DUONG (vi du: 980, 3920).
-    * Neu cot "Tiền thắng" hien thi so am (co dau -, vi du: "-1,000", "-500") -> lay so nguyen (bo dau phan cach nghin) va gan vao "winnings_amount" NHUNG GIU NGUYEN DAU AM (vi du: -1000, -500).
-    * Neu cot "Tiền thắng" hien thi "0" -> gan "winnings_amount" = 0.
-- PHAN TICH MAU SAC cua TEXT trong cot "Tiền thắng":
-    * Neu mau text gan voi mau DO (red, #FF0000, rgb(255,0,0), hoac mau tuong tu) -> gan "winnings_color" = "red".
-    * Neu mau text gan voi mau XANH LA CAY (green, #00FF00, rgb(0,255,0), hoac mau tuong tu) -> gan "winnings_color" = "green".
-    * Neu khong phai mau do hoac xanh la cay -> gan "winnings_color" = null.
 - Doc TOAN BO NOI DUNG TEXT trong anh da crop va gan vao khoa "column_5". 
     * Hay doc HET TOAN BO text hien thi trong anh, bao gom: "Đặt", "Kết quả", "Tổng đặt", "Hoàn trả" va cac gia tri tuong ung.
     * Format: "Đặt <gia_tri>. Kết quả <gia_tri>. Tổng đặt <so_tien>. Hoàn trả <so_tien>."
@@ -1317,7 +1308,7 @@ async def mobile_analyze(
     * Neu khong doc duoc day du, hay doc toan bo text co trong anh va gan vao "column_5".
 - Lay so phien o cot "Phiên" (cot thu 1) cua DONG DAU TIEN lam gia tri cho khoa "Id" (bo ky tu "#" neu co).
 
-Tra ve dung JSON: {"Id":"<ma phien>","bet_amount":<so tien>,"winnings_amount":<so tien thang/thua hoac null>,"winnings_color":<"red"|"green"|null>,"column_5":"<TOAN BO NOI DUNG TEXT DOC DUOC TU ANH>"}.
+Tra ve dung JSON: {"Id":"<ma phien>","bet_amount":<so tien>,"column_5":"<TOAN BO NOI DUNG TEXT DOC DUOC TU ANH>"}.
 
 CHI tra ve JSON thuan (khong giai thich, khong dung code block)."""
 
@@ -1588,46 +1579,6 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 if amount_match:
                     bet_amount_value = parse_numeric_value(amount_match.group(1))
 
-            winnings_amount_raw = parsed_response.get("winnings_amount")
-            win_loss_from_ai = parsed_response.get("win_loss")
-            
-            # Parse winnings_amount với hàm giữ dấu âm
-            winnings_amount_value = parse_signed_numeric_value(winnings_amount_raw)
-            
-            # Fallback: nếu không parse được từ JSON, thử parse từ text response
-            if winnings_amount_value is None and chatgpt_text:
-                try:
-                    # Tìm winnings_amount trong text response
-                    winnings_match = re.search(r'"winnings_amount"\s*:\s*(-?\d+|null)', chatgpt_text)
-                    if winnings_match:
-                        winnings_str = winnings_match.group(1)
-                        if winnings_str != "null":
-                            winnings_amount_value = int(winnings_str)
-                    # Nếu vẫn không có, thử tìm pattern khác
-                    if winnings_amount_value is None:
-                        # Tìm số âm/dương trong cột "Tiền thắng"
-                        tien_thang_match = re.search(r'Tiền thắng.*?([+-]?\d{1,3}(?:,\d{3})*)', chatgpt_text, re.IGNORECASE)
-                        if tien_thang_match:
-                            winnings_str = tien_thang_match.group(1).replace(",", "")
-                            winnings_amount_value = int(winnings_str)
-                except Exception:
-                    pass
-            
-            # Parse winnings_color từ ChatGPT response (cần parse trước để dùng cho logic win_loss)
-            winnings_color = parsed_response.get("winnings_color")
-            if winnings_color:
-                winnings_color = str(winnings_color).lower()
-                if winnings_color not in ["red", "green"]:
-                    winnings_color = None
-            else:
-                # Fallback: tìm trong text response
-                if '"winnings_color"\s*:\s*"red"' in chatgpt_text.lower():
-                    winnings_color = "red"
-                elif '"winnings_color"\s*:\s*"green"' in chatgpt_text.lower():
-                    winnings_color = "green"
-                else:
-                    winnings_color = None
-
             # Parse column_5 từ ChatGPT response (cần parse trước để dùng cho logic win_loss)
             column_5 = parsed_response.get("column_5")
             if not column_5 and chatgpt_text:
@@ -1672,92 +1623,19 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 
                 return dat_value, ket_qua_value
 
-            # Tính win_loss
-            win_loss_token = None
+            # Tính win_loss chỉ dựa vào column_5
+            win_loss_token = "unknown"
             
-            # Kiểm tra điều kiện đặc biệt: winnings_color = null, tien_thang = 0, bet_amount != 0 → unknown
-            if (winnings_color is None and 
-                (winnings_amount_value == 0 or winnings_amount_value is None) and 
-                bet_amount_value is not None and bet_amount_value != 0):
-                win_loss_token = "unknown"
-            # Kiểm tra nếu "Tiền thắng" là "-" → unknown
-            elif winnings_amount_raw is None or (isinstance(winnings_amount_raw, str) and winnings_amount_raw.strip() == "-"):
-                if '"win_loss"\s*:\s*"unknown"' in chatgpt_text or re.search(r'Tiền thắng.*?[-]', chatgpt_text, re.IGNORECASE):
-                    win_loss_token = "unknown"
-            else:
-                # Parse column_5 để kiểm tra điều kiện
-                dat_value, ket_qua_value = parse_dat_ket_qua(column_5)
-                has_column_5_format = dat_value is not None and ket_qua_value is not None
-                
-                # Kiểm tra điều kiện: bet_amount != 0, tien_thang != 0, winnings_color là red/green, column_5 có format đúng
-                if (bet_amount_value is not None and bet_amount_value != 0 and
-                    winnings_amount_value is not None and winnings_amount_value != 0 and
-                    winnings_color in ["red", "green"] and
-                    has_column_5_format):
-                    # Ưu tiên: Set win_loss từ column_5
-                    dat_normalized = dat_value.strip().lower()
-                    ket_qua_normalized = ket_qua_value.strip().lower()
+            # Parse column_5 để tính win_loss
+            dat_value, ket_qua_value = parse_dat_ket_qua(column_5)
+            if dat_value and ket_qua_value:
+                dat_normalized = normalize_choice(dat_value)
+                ket_qua_normalized = normalize_choice(ket_qua_value)
+                if dat_normalized and ket_qua_normalized:
                     if dat_normalized == ket_qua_normalized:
                         win_loss_token = "win"
                     else:
                         win_loss_token = "loss"
-                else:
-                    # Không thỏa điều kiện, tính theo 4 cách như cũ
-                    win_loss_methods = []
-                    
-                    # Cách 1: Dựa vào tien_thang
-                    method1 = None
-                    if winnings_amount_value is not None:
-                        if winnings_amount_value > 0:
-                            method1 = "win"
-                        elif winnings_amount_value < 0:
-                            method1 = "loss"
-                    win_loss_methods.append(method1)
-                    
-                    # Cách 2: Dựa vào winnings_color
-                    method2 = None
-                    if winnings_color == "green":
-                        method2 = "win"
-                    elif winnings_color == "red":
-                        method2 = "loss"
-                    win_loss_methods.append(method2)
-                    
-                    # Cách 3: Dựa vào column_5 (so sánh "Đặt" và "Kết quả")
-                    method3 = None
-                    if has_column_5_format:
-                        dat_normalized = dat_value.strip().lower()
-                        ket_qua_normalized = ket_qua_value.strip().lower()
-                        if dat_normalized == ket_qua_normalized:
-                            method3 = "win"
-                        else:
-                            method3 = "loss"
-                    win_loss_methods.append(method3)
-                    
-                    # Cách 4: Dựa vào giá trị tuyệt đối của winnings_amount và bet_amount
-                    method4 = None
-                    if winnings_amount_value is not None and bet_amount_value is not None:
-                        abs_winnings = abs(winnings_amount_value)
-                        abs_bet = abs(bet_amount_value)
-                        if abs_winnings == abs_bet:
-                            method4 = "loss"
-                        else:
-                            method4 = "win"
-                    win_loss_methods.append(method4)
-                    
-                    # Tổng hợp kết quả: Nếu cả 4 cách đều ra cùng 1 kết quả → dùng kết quả đó
-                    # Nếu ít nhất 1 cách ra kết quả khác → "unknown"
-                    valid_methods = [m for m in win_loss_methods if m is not None]
-                    if len(valid_methods) == 4:
-                        # Có đủ 4 methods, kiểm tra xem có giống nhau không
-                        if len(set(valid_methods)) == 1:
-                            # Tất cả đều giống nhau → dùng kết quả đó
-                            win_loss_token = valid_methods[0]
-                        else:
-                            # Có ít nhất 1 method khác → unknown
-                            win_loss_token = "unknown"
-                    else:
-                        # Không có đủ 4 methods → không thể xác nhận → unknown
-                        win_loss_token = "unknown"
 
             win_loss_label = win_label_from_token(win_loss_token)
 
@@ -1816,11 +1694,8 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 "betting_method": betting_method,
                 "image_type": "HISTORY",
                 "bet_amount": bet_amount_value,
-                "tien_thang": winnings_amount_value,
-                "winnings_amount": winnings_amount_value,  # Alias cho tương thích
-                "winnings_color": winnings_color,  # "red" hoặc "green" hoặc null
                 "win_loss": win_loss_token,
-                "column_5": column_5,  # Nội dung cột thứ 5 (bên phải cột Tiền thắng)
+                "column_5": column_5,  # Nội dung cột thứ 5 (toàn bộ nội dung đọc được từ ảnh)
             }
             
 
@@ -3140,8 +3015,6 @@ async def download_mobile_history_json(record_id: int):
                 payload["button_place_bet_error"] = record.get("button_place_bet_error")
         elif image_type == "HISTORY":
             # Parse các giá trị từ chatgpt_response nếu có
-            tien_thang_value = None
-            winnings_color_value = None
             column_5_value = None
             return_value = None
             win_loss_value = None
@@ -3166,43 +3039,6 @@ async def download_mobile_history_json(record_id: int):
                             return {}
                     
                     parsed = parse_json_payload(chatgpt_response)
-                    
-                    # Pattern 1: Tìm winnings_amount trong JSON response (nhiều format)
-                    patterns = [
-                        r'"winnings_amount"\s*:\s*(-?\d+|null)',
-                        r'"winnings_amount"\s*:\s*"?(-?\d+(?:,\d{3})*)"?',
-                        r'winnings_amount["\s]*:[\s]*(-?\d+)',
-                        r'"Tiền thắng"\s*:\s*(-?\d+|null)',
-                    ]
-                    for pattern in patterns:
-                        winnings_match = re.search(pattern, chatgpt_response, re.IGNORECASE)
-                        if winnings_match:
-                            winnings_str = winnings_match.group(1)
-                            if winnings_str and winnings_str.lower() != "null":
-                                winnings_str = winnings_str.replace(",", "").replace("+", "")
-                                if winnings_str.startswith("-"):
-                                    tien_thang_value = -int(winnings_str[1:])
-                                else:
-                                    tien_thang_value = int(winnings_str)
-                                break
-                    
-                    # Pattern 2: Tìm số trong cột "Tiền thắng" từ text mô tả
-                    if tien_thang_value is None:
-                        tien_thang_patterns = [
-                            r'Tiền thắng.*?([+-]?\d{1,3}(?:,\d{3})*)',
-                            r'Tiền thắng.*?(-?\d+)',
-                            r'winnings.*?([+-]?\d{1,3}(?:,\d{3})*)',
-                        ]
-                        for pattern in tien_thang_patterns:
-                            tien_thang_match = re.search(pattern, chatgpt_response, re.IGNORECASE)
-                            if tien_thang_match:
-                                winnings_str = tien_thang_match.group(1).replace(",", "").replace("+", "")
-                                if winnings_str and winnings_str != "-":
-                                    if winnings_str.startswith("-"):
-                                        tien_thang_value = -int(winnings_str[1:])
-                                    else:
-                                        tien_thang_value = int(winnings_str)
-                                    break
                     
                     # Parse return (hoàn trả) từ chatgpt_response
                     # Ưu tiên lấy từ parsed JSON
@@ -3231,11 +3067,6 @@ async def download_mobile_history_json(record_id: int):
                                 if hoan_tra_str.isdigit():
                                     return_value = int(hoan_tra_str)
                                     break
-                    
-                    # Parse winnings_color từ chatgpt_response
-                    winnings_color_match = re.search(r'"winnings_color"\s*:\s*"(red|green)"', chatgpt_response, re.IGNORECASE)
-                    if winnings_color_match:
-                        winnings_color_value = winnings_color_match.group(1).lower()
                     
                     # Parse column_5 - ưu tiên lấy toàn bộ nội dung từ parsed JSON
                     # Với prompt mới, ChatGPT sẽ trả về toàn bộ text đọc được trong column_5
@@ -3315,9 +3146,6 @@ async def download_mobile_history_json(record_id: int):
             payload = {
                 **base_payload,
                 "bet_amount": record.get("bet_amount"),
-                "tien_thang": tien_thang_value,
-                "winnings_amount": tien_thang_value,  # Alias cho tương thích
-                "winnings_color": winnings_color_value,  # "red" hoặc "green" hoặc null
                 "win_loss": win_loss_value,
                 "return": return_value,  # Giá trị hoàn trả
                 "column_5": column_5_value,  # Nội dung cột thứ 5 (toàn bộ nội dung đọc được)
@@ -3325,19 +3153,13 @@ async def download_mobile_history_json(record_id: int):
         else:
             payload = base_payload
 
-        # Giữ tien_thang, winnings_amount, winnings_color, column_5 và return ngay cả khi None, nhưng loại bỏ các field None khác
-        tien_thang_val = payload.pop("tien_thang", None)
-        winnings_amount_val = payload.pop("winnings_amount", None)
-        winnings_color_val = payload.pop("winnings_color", None)
+        # Giữ column_5 và return ngay cả khi None, nhưng loại bỏ các field None khác
         column_5_val = payload.pop("column_5", None)
         return_val = payload.pop("return", None)
         filtered_payload = {k: v for k, v in payload.items() if v is not None}
         # Thêm lại các field quan trọng vào cuối (LUÔN thêm, kể cả khi None)
         if image_type == "HISTORY":
             # Đảm bảo luôn có các field này trong JSON, thay null bằng "unknown"
-            filtered_payload["tien_thang"] = tien_thang_val if tien_thang_val is not None else "unknown"
-            filtered_payload["winnings_amount"] = winnings_amount_val if winnings_amount_val is not None else "unknown"
-            filtered_payload["winnings_color"] = winnings_color_val if winnings_color_val is not None else "unknown"
             filtered_payload["column_5"] = column_5_val if column_5_val is not None else "unknown"
             filtered_payload["return"] = return_val if return_val is not None else "unknown"
         

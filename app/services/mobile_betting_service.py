@@ -739,10 +739,10 @@ class MobileBettingService:
     
     def get_latest_valid_history_record(self, device_name: str) -> Optional[Dict]:
         """
-        Lấy record HISTORY gần nhất của device có tien_thang != 0 và winnings_color != null
+        Lấy record HISTORY gần nhất của device có column_5 hợp lệ
         
         Returns:
-            Dict với các giá trị: tien_thang, winnings_color, winnings_amount, win_loss, column_5, bet_amount
+            Dict với các giá trị: win_loss, column_5, bet_amount, return
             hoặc None nếu không tìm thấy
         """
         import re
@@ -762,7 +762,7 @@ class MobileBettingService:
         rows = cursor.fetchall()
         conn.close()
         
-        # Parse từ chatgpt_response để tìm record có tien_thang != 0 và winnings_color != null
+        # Parse từ chatgpt_response để tìm record có column_5 hợp lệ
         for row in rows:
             record_id, chatgpt_response, bet_amount, win_loss, created_at = row
             
@@ -780,49 +780,40 @@ class MobileBettingService:
                     cleaned = cleaned[start : end + 1]
                     parsed = json_lib.loads(cleaned)
                     
-                    winnings_amount = parsed.get("winnings_amount")
-                    winnings_color = parsed.get("winnings_color")
                     column_5 = parsed.get("column_5")
+                    return_val = parsed.get("hoan_tra") or parsed.get("Hoàn trả") or parsed.get("return")
                     
-                    # Kiểm tra điều kiện: tien_thang != 0 và winnings_color != null
-                    if winnings_amount is not None and winnings_amount != 0 and winnings_color is not None:
+                    # Kiểm tra điều kiện: column_5 hợp lệ (không phải unknown hoặc placeholder)
+                    if column_5 and column_5 not in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>", ""]:
                         return {
-                            'tien_thang': winnings_amount,
-                            'winnings_amount': winnings_amount,
-                            'winnings_color': winnings_color,
                             'win_loss': win_loss,
                             'column_5': column_5,
                             'bet_amount': bet_amount,
+                            'return': return_val,
                             'record_id': record_id
                         }
             except Exception:
                 # Nếu parse JSON thất bại, thử parse bằng regex
                 try:
-                    # Tìm winnings_amount
-                    winnings_match = re.search(r'"winnings_amount"\s*:\s*(-?\d+|null)', chatgpt_response)
-                    winnings_amount = None
-                    if winnings_match:
-                        winnings_str = winnings_match.group(1)
-                        if winnings_str != "null":
-                            winnings_amount = int(winnings_str)
-                    
-                    # Tìm winnings_color
-                    color_match = re.search(r'"winnings_color"\s*:\s*"?(red|green)"?', chatgpt_response, re.IGNORECASE)
-                    winnings_color = color_match.group(1).lower() if color_match else None
-                    
                     # Tìm column_5
                     column5_match = re.search(r'"column_5"\s*:\s*"([^"]*)"', chatgpt_response)
                     column_5 = column5_match.group(1) if column5_match else None
                     
-                    # Kiểm tra điều kiện
-                    if winnings_amount is not None and winnings_amount != 0 and winnings_color is not None:
+                    # Tìm return
+                    return_match = re.search(r'"hoan_tra"\s*:\s*"?(\d+(?:,\d{3})*)"?', chatgpt_response)
+                    return_val = None
+                    if return_match:
+                        return_str = return_match.group(1).replace(",", "").strip()
+                        if return_str.isdigit():
+                            return_val = int(return_str)
+                    
+                    # Kiểm tra điều kiện: column_5 hợp lệ
+                    if column_5 and column_5 not in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>", ""]:
                         return {
-                            'tien_thang': winnings_amount,
-                            'winnings_amount': winnings_amount,
-                            'winnings_color': winnings_color,
                             'win_loss': win_loss,
                             'column_5': column_5,
                             'bet_amount': bet_amount,
+                            'return': return_val,
                             'record_id': record_id
                         }
                 except Exception:
