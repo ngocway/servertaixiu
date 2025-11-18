@@ -793,7 +793,21 @@ def _build_dashboard_html() -> str:
                     const tagLabel = record.image_type || 'UNKNOWN';
 
                     const planned = record.bet_amount ?? '-';
-                    const winLoss = record.win_loss || '-';
+                    // Convert win_loss token to label for display
+                    let winLossDisplay = '-';
+                    if (record.win_loss) {
+                        const winLossValue = record.win_loss.toLowerCase();
+                        if (winLossValue === 'win' || winLossValue === 'thắng') {
+                            winLossDisplay = 'Win';
+                        } else if (winLossValue === 'loss' || winLossValue === 'thua') {
+                            winLossDisplay = 'Loss';
+                        } else if (winLossValue === 'unknown' || winLossValue === 'chưa xác định') {
+                            winLossDisplay = 'Unknown';
+                        } else {
+                            // Giữ nguyên nếu là label khác
+                            winLossDisplay = record.win_loss;
+                        }
+                    }
                     const seconds = record.seconds_remaining ?? '-';
 
                     tr.innerHTML = `
@@ -802,7 +816,7 @@ def _build_dashboard_html() -> str:
                         <td><span class="tag ${tagClass}">${tagLabel}</span></td>
                         <td class="center">${seconds}</td>
                         <td class="right">${formatNumber(planned)}</td>
-                        <td class="center">${winLoss}</td>
+                        <td class="center">${winLossDisplay}</td>
                         <td class="actions">
                             ${record.image_path ? `<button class="secondary small" data-id="${record.id}" data-seconds="${record.seconds_region_coords || ''}" data-bet="${record.bet_region_coords || ''}" onclick="openImageModal(this)">🖼️ Image</button>` : ''}
                             ${record.image_type === 'HISTORY' && record.image_path ? `<button class="secondary small mobile-hide" data-id="${record.id}" onclick="openCroppedImageModal(this)">✂️ View Cropped</button>` : ''}
@@ -2067,6 +2081,12 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
 async def get_mobile_history(limit: int = 50, page: int = 1):
     try:
         history, total_count = mobile_betting_service.get_analysis_history(limit=limit, page=page)
+        
+        # Convert win_loss từ label sang token để nhất quán với JSON endpoint
+        for record in history:
+            if record.get('win_loss'):
+                record['win_loss'] = win_token_from_label(record['win_loss']) or record['win_loss']
+        
         total_pages = (total_count + limit - 1) // limit if limit > 0 else 1
         return {
             "success": True,
