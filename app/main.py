@@ -3034,13 +3034,34 @@ async def download_mobile_history_json(record_id: int):
             elif record.get("button_place_bet_error"):
                 payload["button_place_bet_error"] = record.get("button_place_bet_error")
         elif image_type == "HISTORY":
-            # Parse tien_thang từ chatgpt_response nếu có
+            # Parse các giá trị từ chatgpt_response nếu có
             tien_thang_value = None
             winnings_color_value = None
             column_5_value = None
+            return_value = None
+            win_loss_value = None
             chatgpt_response = record.get("chatgpt_response")
+            
             if chatgpt_response:
                 try:
+                    # Parse JSON từ chatgpt_response nếu có
+                    def parse_json_payload(raw_text: str) -> Dict[str, Any]:
+                        if not raw_text:
+                            return {}
+                        cleaned = raw_text.strip()
+                        start = cleaned.find('{')
+                        end = cleaned.rfind('}')
+                        if start != -1 and end != -1 and end >= start:
+                            cleaned = cleaned[start : end + 1]
+                        try:
+                            return json.loads(cleaned)
+                        except json.JSONDecodeError:
+                            return {}
+                        except Exception:
+                            return {}
+                    
+                    parsed = parse_json_payload(chatgpt_response)
+                    
                     # Pattern 1: Tìm winnings_amount trong JSON response (nhiều format)
                     patterns = [
                         r'"winnings_amount"\s*:\s*(-?\d+|null)',
@@ -3078,18 +3099,126 @@ async def download_mobile_history_json(record_id: int):
                                         tien_thang_value = int(winnings_str)
                                     break
                     
+                    # Parse return (hoàn trả) từ chatgpt_response
+                    # Ưu tiên lấy từ parsed JSON
+                    hoan_tra_str = parsed.get("hoan_tra") or parsed.get("Hoàn trả") or parsed.get("return")
+                    if hoan_tra_str:
+                        try:
+                            hoan_tra_clean = str(hoan_tra_str).replace(",", "").replace(" ", "").strip()
+                            if hoan_tra_clean.isdigit():
+                                return_value = int(hoan_tra_clean)
+                        except (ValueError, AttributeError):
+                            pass
+                    
+                    # Nếu chưa có, tìm trong text
+                    if return_value is None:
+                        hoan_tra_patterns = [
+                            r'"hoan_tra"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                            r'"Hoàn trả"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                            r'"return"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                            r'Hoàn trả.*?(\d{1,3}(?:,\d{3})*)',
+                            r'hoàn trả.*?(\d{1,3}(?:,\d{3})*)',
+                        ]
+                        for pattern in hoan_tra_patterns:
+                            hoan_tra_match = re.search(pattern, chatgpt_response, re.IGNORECASE)
+                            if hoan_tra_match:
+                                hoan_tra_str = hoan_tra_match.group(1).replace(",", "").strip()
+                                if hoan_tra_str.isdigit():
+                                    return_value = int(hoan_tra_str)
+                                    break
+                    
                     # Parse winnings_color từ chatgpt_response
                     winnings_color_match = re.search(r'"winnings_color"\s*:\s*"(red|green)"', chatgpt_response, re.IGNORECASE)
                     if winnings_color_match:
                         winnings_color_value = winnings_color_match.group(1).lower()
                     
-                    # Parse column_5 từ chatgpt_response
-                    column_5_match = re.search(r'"column_5"\s*:\s*"([^"]*)"', chatgpt_response)
-                    if column_5_match:
-                        column_5_value = column_5_match.group(1)
+                    # Parse column_5 - ưu tiên lấy toàn bộ nội dung từ parsed JSON hoặc raw text
+                    # Nếu có trong parsed JSON, lấy từ đó
+                    column_5_value = parsed.get("column_5")
+                    
+                    # Nếu không có, tìm trong text với nhiều pattern
+                    if not column_5_value:
+                        column_5_match = re.search(r'"column_5"\s*:\s*"([^"]*)"', chatgpt_response)
+                        if column_5_match:
+                            column_5_value = column_5_match.group(1)
+                    
+                    # Nếu vẫn không có, thử lấy toàn bộ nội dung đọc được từ ảnh
+                    # Tìm phần mô tả nội dung trong chatgpt_response
+                    if not column_5_value or column_5_value in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>"]:
+                        # Tìm phần mô tả chi tiết trong response
+                        # Ví dụ: "Đặt Xiu. Kết quả: Tài. Tổng đặt 64,000. Hoàn trả 0."
+                        detail_patterns = [
+                            r'Đặt\s+[^\.]+\.\s*Kết quả[^\.]+\.\s*Tổng đặt[^\.]+\.\s*Hoàn trả[^\.]+\.',
+                            r'Đặt\s+[^\.]+\.\s*Kết quả[^\.]+\.',
+                            r'Đặt[^\.]+Kết quả[^\.]+',
+                            r'column_5[^"]*"([^"]+)"',
+                        ]
+                        for pattern in detail_patterns:
+                            detail_match = re.search(pattern, chatgpt_response, re.IGNORECASE | re.DOTALL)
+                            if detail_match:
+                                column_5_value = detail_match.group(0) if detail_match.groups() == () else detail_match.group(1)
+                                break
+                        
+                        # Nếu vẫn không tìm thấy pattern cụ thể, thử lấy toàn bộ text mô tả từ ChatGPT
+                        # (phần text không nằm trong JSON)
+                        if not column_5_value or column_5_value in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>"]:
+                            # Tách phần JSON và phần text mô tả
+                            json_start = chatgpt_response.find('{')
+                            json_end = chatgpt_response.rfind('}')
+                            if json_start != -1 and json_end != -1:
+                                # Lấy phần text trước và sau JSON
+                                text_before = chatgpt_response[:json_start].strip()
+                                text_after = chatgpt_response[json_end+1:].strip()
+                                # Kết hợp lại để lấy toàn bộ mô tả
+                                full_description = (text_before + " " + text_after).strip()
+                                if full_description and len(full_description) > 10:  # Chỉ lấy nếu có nội dung đáng kể
+                                    column_5_value = full_description
+                    
+                    # Parse win_loss từ column_5 nếu có
+                    if column_5_value:
+                        def parse_dat_ket_qua(column_5_text: str) -> tuple:
+                            """Parse 'Đặt' và 'Kết quả' từ column_5. Trả về (dat_value, ket_qua_value) hoặc (None, None)"""
+                            if not column_5_text:
+                                return (None, None)
+                            column_5_text = str(column_5_text).strip()
+                            dat_value = None
+                            ket_qua_value = None
+                            
+                            # Tìm "Đặt"
+                            dat_match = re.search(r'Đặt\s*:?\s*([^,\.]+?)(?=[,\.]|\s*Kết quả|$)', column_5_text, re.IGNORECASE)
+                            if dat_match:
+                                dat_value = dat_match.group(1).strip()
+                            
+                            # Tìm "Kết quả"
+                            ket_qua_match = re.search(r'Kết quả\s*:?\s*([^,\.]+)', column_5_text, re.IGNORECASE)
+                            if ket_qua_match:
+                                ket_qua_value = ket_qua_match.group(1).strip()
+                            
+                            return (dat_value, ket_qua_value)
+                        
+                        dat_value, ket_qua_value = parse_dat_ket_qua(column_5_value)
+                        if dat_value and ket_qua_value:
+                            dat_normalized = normalize_choice(dat_value)
+                            ket_qua_normalized = normalize_choice(ket_qua_value)
+                            if dat_normalized and ket_qua_normalized:
+                                if dat_normalized == ket_qua_normalized:
+                                    win_loss_value = "win"
+                                else:
+                                    win_loss_value = "loss"
+                    
+                    # Nếu win_loss vẫn chưa có, dùng giá trị từ database
+                    if win_loss_value is None:
+                        win_loss_value = win_token_from_label(record.get("win_loss"))
                 except Exception as e:
                     # Log error nhưng không crash
-                    pass
+                    import traceback
+                    print(f"[Parse HISTORY JSON Error]: {traceback.format_exc()}")
+                    # Fallback về giá trị từ database
+                    win_loss_value = win_token_from_label(record.get("win_loss"))
+            
+            # Nếu không có chatgpt_response, dùng giá trị từ database
+            if win_loss_value is None:
+                win_loss_value = win_token_from_label(record.get("win_loss"))
             
             payload = {
                 **base_payload,
@@ -3097,17 +3226,19 @@ async def download_mobile_history_json(record_id: int):
                 "tien_thang": tien_thang_value,
                 "winnings_amount": tien_thang_value,  # Alias cho tương thích
                 "winnings_color": winnings_color_value,  # "red" hoặc "green" hoặc null
-                "win_loss": win_token_from_label(record.get("win_loss")),
-                "column_5": column_5_value,  # Nội dung cột thứ 5
+                "win_loss": win_loss_value,
+                "return": return_value,  # Giá trị hoàn trả
+                "column_5": column_5_value,  # Nội dung cột thứ 5 (toàn bộ nội dung đọc được)
             }
         else:
             payload = base_payload
 
-        # Giữ tien_thang, winnings_amount, winnings_color và column_5 ngay cả khi None, nhưng loại bỏ các field None khác
+        # Giữ tien_thang, winnings_amount, winnings_color, column_5 và return ngay cả khi None, nhưng loại bỏ các field None khác
         tien_thang_val = payload.pop("tien_thang", None)
         winnings_amount_val = payload.pop("winnings_amount", None)
         winnings_color_val = payload.pop("winnings_color", None)
         column_5_val = payload.pop("column_5", None)
+        return_val = payload.pop("return", None)
         filtered_payload = {k: v for k, v in payload.items() if v is not None}
         # Thêm lại các field quan trọng vào cuối (LUÔN thêm, kể cả khi None)
         if image_type == "HISTORY":
@@ -3116,6 +3247,7 @@ async def download_mobile_history_json(record_id: int):
             filtered_payload["winnings_amount"] = winnings_amount_val
             filtered_payload["winnings_color"] = winnings_color_val
             filtered_payload["column_5"] = column_5_val
+            filtered_payload["return"] = return_val
             
 
         return filtered_payload
