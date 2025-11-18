@@ -424,11 +424,12 @@ def _build_dashboard_html() -> str:
                             <th class=\"center\">Seconds</th>
                             <th class=\"right\">Bet amount</th>
                             <th class=\"center\">Result</th>
+                            <th class=\"right\">Return</th>
                             <th>Action</th>
                         </tr>
                     </thead>
                     <tbody id=\"history-body\">
-                        <tr><td colspan="7" class=\"empty\">Äang táº£i dá»¯ liá»‡u...</td></tr>
+                        <tr><td colspan="8" class=\"empty\">Äang táº£i dá»¯ liá»‡u...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -714,7 +715,7 @@ def _build_dashboard_html() -> str:
             const filterDevice = document.getElementById('filter-device').value;
             const filterResult = document.getElementById('filter-result').value;
             const tbody = document.getElementById('history-body');
-            tbody.innerHTML = '<tr><td colspan="7" class="empty">Äang táº£i dá»¯ liá»‡u...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="empty">Äang táº£i dá»¯ liá»‡u...</td></tr>';
             try {
                 // Lấy tất cả data từ server (không paginate ở server vì cần filter ở client)
                 const resp = await fetch(`/api/mobile/history?limit=10000&page=1`);
@@ -809,6 +810,7 @@ def _build_dashboard_html() -> str:
                         }
                     }
                     const seconds = record.seconds_remaining ?? '-';
+                    const returnValue = record.return !== null && record.return !== undefined ? formatNumber(record.return) : '-';
 
                     tr.innerHTML = `
                         <td>#${record.id}</td>
@@ -817,6 +819,7 @@ def _build_dashboard_html() -> str:
                         <td class="center">${seconds}</td>
                         <td class="right">${formatNumber(planned)}</td>
                         <td class="center">${winLossDisplay}</td>
+                        <td class="right">${returnValue}</td>
                         <td class="actions">
                             ${record.image_path ? `<button class="secondary small" data-id="${record.id}" data-seconds="${record.seconds_region_coords || ''}" data-bet="${record.bet_region_coords || ''}" onclick="openImageModal(this)">🖼️ Image</button>` : ''}
                             ${record.image_type === 'HISTORY' && record.image_path ? `<button class="secondary small mobile-hide" data-id="${record.id}" onclick="openCroppedImageModal(this)">✂️ View Cropped</button>` : ''}
@@ -832,7 +835,7 @@ def _build_dashboard_html() -> str:
                 renderPagination(currentPage, totalPages);
             } catch (error) {
                 console.error(error);
-                tbody.innerHTML = `<tr><td colspan="7" class="empty">${error.message}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" class="empty">${error.message}</td></tr>`;
                 renderPagination(1, 0);
             }
         }
@@ -2108,9 +2111,34 @@ async def get_mobile_history(limit: int = 50, page: int = 1):
                                             record['win_loss'] = "win"
                                         else:
                                             record['win_loss'] = "loss"
+                            
+                            # Parse return từ parsed JSON hoặc text
+                            return_value = parsed.get("return")
+                            if return_value is None:
+                                # Tìm trong text với nhiều pattern
+                                hoan_tra_patterns = [
+                                    r'"hoan_tra"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                                    r'"Hoàn trả"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                                    r'"return"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                                    r'Hoàn trả.*?(\d{1,3}(?:,\d{3})*)',
+                                    r'hoàn trả.*?(\d{1,3}(?:,\d{3})*)',
+                                ]
+                                for pattern in hoan_tra_patterns:
+                                    hoan_tra_match = re.search(pattern, chatgpt_response, re.IGNORECASE)
+                                    if hoan_tra_match:
+                                        hoan_tra_str = hoan_tra_match.group(1).replace(",", "").strip()
+                                        if hoan_tra_str.isdigit():
+                                            return_value = int(hoan_tra_str)
+                                            break
+                            
+                            # Set return value
+                            if return_value is not None:
+                                record['return'] = return_value
+                            else:
+                                record['return'] = None
                         except Exception as e:
                             # Nếu parse thất bại, dùng giá trị từ database
-                            pass
+                            record['return'] = None
                 
                 # Convert win_loss từ label sang token nếu chưa phải token
                 if record.get('win_loss'):
@@ -2122,6 +2150,15 @@ async def get_mobile_history(limit: int = 50, page: int = 1):
                         record['win_loss'] = "unknown"
                 else:
                     record['win_loss'] = "unknown"
+                
+                # Đảm bảo return có giá trị mặc định nếu chưa được set
+                if 'return' not in record:
+                    record['return'] = None
+        
+        # Đảm bảo tất cả các record đều có field return
+        for record in history:
+            if 'return' not in record:
+                record['return'] = None
         
         conn.close()
         
