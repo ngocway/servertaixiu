@@ -156,9 +156,17 @@ class MobileBettingService:
                 button_place_bet_coords TEXT,
                 betting_match_counter INTEGER DEFAULT 0,
                 last_match_at TIMESTAMP,
+                best_template_method TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Thêm cột best_template_method nếu chưa có (migration)
+        try:
+            cursor.execute("ALTER TABLE device_button_coords ADD COLUMN best_template_method TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column đã tồn tại
         
         # Thêm cột button_50k_coords nếu chưa có (migration)
         try:
@@ -859,7 +867,7 @@ class MobileBettingService:
         
         cursor.execute("""
             SELECT button_1k_coords, button_10k_coords, button_50k_coords, button_bet_coords, button_place_bet_coords,
-                   betting_match_counter
+                   betting_match_counter, best_template_method
             FROM device_button_coords
             WHERE device_name = ?
         """, (device_name,))
@@ -884,7 +892,8 @@ class MobileBettingService:
             'button_50k_coords': json_to_coords(row[2]),
             'button_bet_coords': json_to_coords(row[3]),
             'button_place_bet_coords': json_to_coords(row[4]),
-            'betting_match_counter': row[5] or 0
+            'betting_match_counter': row[5] or 0,
+            'best_template_method': row[6] if row[6] else None
         }
     
     def should_match_buttons(self, device_name: str) -> Tuple[bool, int]:

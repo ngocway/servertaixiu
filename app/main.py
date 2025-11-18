@@ -1734,8 +1734,14 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             # Chỉ chạy template matching nếu seconds trong khoảng 34-49
             should_run_template_matching = (seconds_value >= 34 and seconds_value <= 49)
             
+            # Lấy method tốt nhất cho device (nếu có)
+            best_method = saved_coords.get('best_template_method') if saved_coords else None
+            
             # Hàm helper để tìm và tính tọa độ cho một loại button
-            def find_button_coords(sample_path: Path, button_name: str):
+            def find_button_coords(sample_path: Path, button_name: str, is_first_match: bool = False):
+                """
+                is_first_match: True nếu đây là lần match đầu tiên (cần thử tất cả methods để tìm method tốt nhất)
+                """
                 coords = None
                 error = None
                 
@@ -1750,7 +1756,10 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                     error = f"Thiếu tham số: {', '.join(missing_params)}. Client cần gửi kích thước màn hình mobile thật trong request."
                 else:
                     try:
-                        template_match_result = find_template_in_image(str(sample_path), image, threshold=0.5)
+                        # Nếu là lần match đầu tiên hoặc chưa có best_method, thử tất cả methods
+                        # Nếu đã có best_method, chỉ dùng method đó
+                        preferred_method = None if (is_first_match or not best_method) else best_method
+                        template_match_result = find_template_in_image(str(sample_path), image, threshold=0.5, preferred_method=preferred_method)
                         if template_match_result:
                             # Template matching trả về tọa độ điểm chính giữa trong không gian của image (actual_image_width x actual_image_height)
                             image_center_x = template_match_result["center_x"]
@@ -1785,9 +1794,18 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             # Chỉ chạy template matching nếu seconds trong khoảng 34-49
             if should_run_template_matching:
                 # Nút Cược và 1K: LUÔN match mỗi lần
-                print(f"[BETTING] Matching Nút Cược and 1K for device {device_name} (seconds={seconds_value}, in range 34-49)")
-                button_bet_coords, button_bet_error = find_button_coords(Path("samples/sample_bet_button.jpg"), "Nút Cược")
-                button_1k_coords, button_1k_error = find_button_coords(Path("samples/sample_1k.jpg"), "1K")
+                # Lần đầu tiên match 1K để tìm method tốt nhất (nếu chưa có)
+                is_first_match = (best_method is None)
+                print(f"[BETTING] Matching Nút Cược and 1K for device {device_name} (seconds={seconds_value}, in range 34-49, best_method={best_method or 'not set'})")
+                button_bet_coords, button_bet_error = find_button_coords(Path("samples/sample_bet_button.jpg"), "Nút Cược", is_first_match=is_first_match)
+                button_1k_coords, button_1k_error = find_button_coords(Path("samples/sample_1k.jpg"), "1K", is_first_match=is_first_match)
+                
+                # Nếu là lần match đầu tiên và tìm được method tốt nhất từ 1K, lưu lại
+                if is_first_match and button_1k_coords and button_1k_coords.get("method"):
+                    new_best_method = button_1k_coords.get("method")
+                    mobile_betting_service.save_best_template_method(device_name, new_best_method)
+                    print(f"[BETTING] Saved best template method for device {device_name}: {new_best_method}")
+                    best_method = new_best_method  # Cập nhật để dùng cho các button tiếp theo
                 
                 # 10K, 50K, Nút Đặt Cược: chỉ match khi đến lượt (mỗi 10 lần 1 lần)
                 if saved_coords and not should_match:
@@ -1801,10 +1819,11 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                     print(f"[BETTING] Loaded saved coordinates - 10K: {button_10k_coords}, 50K: {button_50k_coords}, PlaceBet: {button_place_bet_coords}")
                 else:
                     # Cần match 10K, 50K, Nút Đặt Cược: chưa có tọa độ hoặc đến lượt match (mỗi 10 lần 1 lần)
-                    print(f"[BETTING] Matching 10K/50K/PlaceBet button coordinates for device {device_name} (counter: {match_counter}, should_match: {should_match})")
-                    button_10k_coords, button_10k_error = find_button_coords(Path("samples/sample_10k.jpg"), "10K")
-                    button_50k_coords, button_50k_error = find_button_coords(Path("samples/sample_50k.jpg"), "50K")
-                    button_place_bet_coords, button_place_bet_error = find_button_coords(Path("samples/sample_place_bet_button.jpg"), "Nút Đặt Cược")
+                    # Dùng best_method đã có (không phải lần đầu nữa)
+                    print(f"[BETTING] Matching 10K/50K/PlaceBet button coordinates for device {device_name} (counter: {match_counter}, should_match: {should_match}, best_method={best_method or 'not set'})")
+                    button_10k_coords, button_10k_error = find_button_coords(Path("samples/sample_10k.jpg"), "10K", is_first_match=False)
+                    button_50k_coords, button_50k_error = find_button_coords(Path("samples/sample_50k.jpg"), "50K", is_first_match=False)
+                    button_place_bet_coords, button_place_bet_error = find_button_coords(Path("samples/sample_place_bet_button.jpg"), "Nút Đặt Cược", is_first_match=False)
             else:
                 # Skip template matching vì seconds không trong khoảng 34-49
                 print(f"[BETTING] Skipping template matching for device {device_name} (seconds={seconds_value}, not in range 34-49)")
@@ -2426,10 +2445,16 @@ async def get_mobile_history_cropped_image(record_id: int, download: bool = Quer
         raise HTTPException(status_code=500, detail=f"Lỗi lấy ảnh crop: {exc}")
 
 
-def find_template_in_image(template_path: str, target_image: Image.Image, threshold: float = 0.4) -> Optional[Dict[str, int]]:
+def find_template_in_image(template_path: str, target_image: Image.Image, threshold: float = 0.4, preferred_method: Optional[str] = None) -> Optional[Dict[str, int]]:
     """
     Tìm vùng ảnh template trong target image sử dụng template matching với multi-scale và nhiều phương pháp.
-    Trả về dict với keys: x, y, width, height, center_x, center_y, confidence
+    Trả về dict với keys: x, y, width, height, center_x, center_y, confidence, scale, method
+    
+    Args:
+        template_path: Đường dẫn đến ảnh template
+        target_image: Ảnh target (PIL Image)
+        threshold: Ngưỡng confidence tối thiểu
+        preferred_method: Method ưu tiên (nếu có, chỉ dùng method này). Các giá trị: 'TM_CCOEFF_NORMED', 'TM_CCORR_NORMED', 'TM_SQDIFF_NORMED'
     """
     try:
         if not Path(template_path).exists():
@@ -2475,11 +2500,21 @@ def find_template_in_image(template_path: str, target_image: Image.Image, thresh
         best_method = None
         
         # Thử nhiều phương pháp template matching
-        methods = [
+        all_methods = [
             ('TM_CCOEFF_NORMED', cv2.TM_CCOEFF_NORMED),
             ('TM_CCORR_NORMED', cv2.TM_CCORR_NORMED),
             ('TM_SQDIFF_NORMED', cv2.TM_SQDIFF_NORMED),
         ]
+        
+        # Nếu có preferred_method, chỉ dùng method đó
+        if preferred_method:
+            methods = [m for m in all_methods if m[0] == preferred_method]
+            if not methods:
+                # Nếu preferred_method không hợp lệ, dùng tất cả
+                methods = all_methods
+        else:
+            # Không có preferred_method, thử tất cả
+            methods = all_methods
         
         # Thử multi-scale: scale template từ 0.5x đến 1.5x với bước nhỏ hơn để chính xác hơn
         scales = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.45, 1.5]
