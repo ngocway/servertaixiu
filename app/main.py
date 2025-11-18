@@ -1622,6 +1622,12 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                     column_5 = column_5_match.group(1)
                 else:
                     column_5 = None
+            
+            # Nếu column_5 là placeholder text "<noi dung cot thu 5>" thì set thành "unknown"
+            if column_5 and isinstance(column_5, str):
+                column_5_normalized = column_5.strip().lower()
+                if column_5_normalized == "<noi dung cot thu 5>" or column_5_normalized == "<nội dung cột thứ 5>":
+                    column_5 = "unknown"
 
             # Hàm helper để parse "Đặt" và "Kết quả" từ column_5
             def parse_dat_ket_qua(column_5_text: str) -> tuple:
@@ -1654,8 +1660,13 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             # Tính win_loss
             win_loss_token = None
             
+            # Kiểm tra điều kiện đặc biệt: winnings_color = null, tien_thang = 0, bet_amount != 0 → unknown
+            if (winnings_color is None and 
+                (winnings_amount_value == 0 or winnings_amount_value is None) and 
+                bet_amount_value is not None and bet_amount_value != 0):
+                win_loss_token = "unknown"
             # Kiểm tra nếu "Tiền thắng" là "-" → unknown
-            if winnings_amount_raw is None or (isinstance(winnings_amount_raw, str) and winnings_amount_raw.strip() == "-"):
+            elif winnings_amount_raw is None or (isinstance(winnings_amount_raw, str) and winnings_amount_raw.strip() == "-"):
                 if '"win_loss"\s*:\s*"unknown"' in chatgpt_text or re.search(r'Tiền thắng.*?[-]', chatgpt_text, re.IGNORECASE):
                     win_loss_token = "unknown"
             else:
@@ -1762,95 +1773,8 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 except Exception as exc:
                     print(f"Error saving cropped HISTORY image: {exc}")
 
-            # Kiểm tra nếu tien_thang = 0 và winnings_color = null, copy từ record trước gần nhất
-            if (winnings_amount_value == 0 or winnings_amount_value is None) and winnings_color is None:
-                previous_record = mobile_betting_service.get_latest_valid_history_record(device_name)
-                if previous_record:
-                    # Copy các giá trị từ record trước
-                    winnings_amount_value = previous_record.get('tien_thang')
-                    winnings_color = previous_record.get('winnings_color')
-                    column_5 = previous_record.get('column_5') or column_5  # Giữ column_5 hiện tại nếu không có trong record trước
-                    
-                    # Parse lại win_loss từ winnings_amount và winnings_color
-                    # Tính lại win_loss với logic mới
-                    dat_value, ket_qua_value = parse_dat_ket_qua(column_5)
-                    has_column_5_format = dat_value is not None and ket_qua_value is not None
-                    
-                    # Kiểm tra điều kiện: bet_amount != 0, tien_thang != 0, winnings_color là red/green, column_5 có format đúng
-                    if (bet_amount_value is not None and bet_amount_value != 0 and
-                        winnings_amount_value is not None and winnings_amount_value != 0 and
-                        winnings_color in ["red", "green"] and
-                        has_column_5_format):
-                        # Ưu tiên: Set win_loss từ column_5
-                        dat_normalized = dat_value.strip().lower()
-                        ket_qua_normalized = ket_qua_value.strip().lower()
-                        if dat_normalized == ket_qua_normalized:
-                            win_loss_token = "win"
-                        else:
-                            win_loss_token = "loss"
-                    else:
-                        # Không thỏa điều kiện, tính theo 4 cách như cũ
-                        win_loss_methods = []
-                        
-                        # Cách 1: Dựa vào tien_thang
-                        method1 = None
-                        if winnings_amount_value is not None:
-                            if winnings_amount_value > 0:
-                                method1 = "win"
-                            elif winnings_amount_value < 0:
-                                method1 = "loss"
-                        win_loss_methods.append(method1)
-                        
-                        # Cách 2: Dựa vào winnings_color
-                        method2 = None
-                        if winnings_color == "green":
-                            method2 = "win"
-                        elif winnings_color == "red":
-                            method2 = "loss"
-                        win_loss_methods.append(method2)
-                        
-                        # Cách 3: Dựa vào column_5 (so sánh "Đặt" và "Kết quả")
-                        method3 = None
-                        if has_column_5_format:
-                            dat_normalized = dat_value.strip().lower()
-                            ket_qua_normalized = ket_qua_value.strip().lower()
-                            if dat_normalized == ket_qua_normalized:
-                                method3 = "win"
-                            else:
-                                method3 = "loss"
-                        win_loss_methods.append(method3)
-                        
-                        # Cách 4: Dựa vào giá trị tuyệt đối
-                        method4 = None
-                        if winnings_amount_value is not None and bet_amount_value is not None:
-                            abs_winnings = abs(winnings_amount_value)
-                            abs_bet = abs(bet_amount_value)
-                            if abs_winnings == abs_bet:
-                                method4 = "loss"
-                            else:
-                                method4 = "win"
-                        win_loss_methods.append(method4)
-                        
-                        # Tổng hợp kết quả
-                        valid_methods = [m for m in win_loss_methods if m is not None]
-                        if len(valid_methods) == 4:
-                            if len(set(valid_methods)) == 1:
-                                win_loss_token = valid_methods[0]
-                            else:
-                                win_loss_token = "unknown"
-                        else:
-                            win_loss_token = "unknown"
-                    
-                    win_loss_label = win_label_from_token(win_loss_token)
-                    
-                    # Tính lại multiplier với win_loss mới
-                    multiplier = mobile_betting_service.calculate_multiplier(
-                        device_name,
-                        win_loss_label,
-                        bet_amount_for_calc,
-                    )
-                    
-                    print(f"[HISTORY] Copied values from previous record #{previous_record.get('record_id')} for device {device_name}: tien_thang={winnings_amount_value}, winnings_color={winnings_color}")
+            # win_loss đã được tính từ dữ liệu của record hiện tại ở trên (dòng 1654-1734)
+            # Không copy bất kỳ dữ liệu nào từ record trước
 
             mobile_betting_service.save_analysis_history(
                 {
@@ -1950,9 +1874,11 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                             coords = {
                                 "x": device_x,
                                 "y": device_y,
-                                "confidence": template_match_result.get("confidence", 0.0)
+                                "confidence": template_match_result.get("confidence", 0.0),
+                                "template_match_x": image_center_x,  # Tọa độ template match gốc (image coordinates)
+                                "template_match_y": image_center_y
                             }
-                            print(f"Found {button_name} button at device coordinates: ({device_x}, {device_y}), confidence: {template_match_result.get('confidence', 0.0):.2f}")
+                            print(f"Found {button_name} button at device coordinates: ({device_x}, {device_y}), template match: ({image_center_x}, {image_center_y}), confidence: {template_match_result.get('confidence', 0.0):.2f}")
                         else:
                             error = f"Không tìm thấy ảnh {button_name} trong screenshot BETTING. Template matching không khớp (confidence < 0.5). Kiểm tra lại ảnh mẫu {button_name} hoặc screenshot."
                     except Exception as exc:
@@ -2207,26 +2133,43 @@ async def get_mobile_history_image(record_id: int, download: bool = Query(False)
                 actual_image_width = saved_actual_image_width if saved_actual_image_width else current_image_width
                 actual_image_height = saved_actual_image_height if saved_actual_image_height else current_image_height
                 
-                draw = ImageDraw.Draw(image)
+                # Convert image sang RGBA để hỗ trợ alpha composite
+                image_rgba = image.convert("RGBA")
+                draw = ImageDraw.Draw(image_rgba)
                 box_size = 100  # Kích thước khung viền
                 
+                # Tạo overlay để vẽ background transparent
+                overlay = Image.new("RGBA", image_rgba.size, (0, 0, 0, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                
                 # Hàm helper để vẽ khung viền cho một button
-                def draw_button_box(coords_json, color, label):
+                def draw_button_box(coords_json, color, label, is_template_match=False):
                     if not coords_json:
                         return
                     try:
                         coords = json.loads(coords_json) if isinstance(coords_json, str) else coords_json
-                        if coords and isinstance(coords, dict) and "x" in coords and "y" in coords:
-                            device_x = coords.get("x", 0)
-                            device_y = coords.get("y", 0)
-                            
-                            # Scale từ device coordinates về image coordinates
-                            if device_real_width and device_real_height and actual_image_width and actual_image_height:
-                                image_x = int(device_x * (actual_image_width / device_real_width)) if device_real_width > 0 else device_x
-                                image_y = int(device_y * (actual_image_height / device_real_height)) if device_real_height > 0 else device_y
+                        if coords and isinstance(coords, dict):
+                            if is_template_match:
+                                # Vẽ khung tại vị trí template match (image coordinates gốc)
+                                if "template_match_x" in coords and "template_match_y" in coords:
+                                    image_x = coords.get("template_match_x", 0)
+                                    image_y = coords.get("template_match_y", 0)
+                                else:
+                                    return  # Không có template match coordinates
                             else:
-                                image_x = device_x
-                                image_y = device_y
+                                # Vẽ khung tại vị trí device coordinates (sau khi scale)
+                                if "x" not in coords or "y" not in coords:
+                                    return
+                                device_x = coords.get("x", 0)
+                                device_y = coords.get("y", 0)
+                                
+                                # Scale từ device coordinates về image coordinates
+                                if device_real_width and device_real_height and actual_image_width and actual_image_height:
+                                    image_x = int(device_x * (actual_image_width / device_real_width)) if device_real_width > 0 else device_x
+                                    image_y = int(device_y * (actual_image_height / device_real_height)) if device_real_height > 0 else device_y
+                                else:
+                                    image_x = device_x
+                                    image_y = device_y
                             
                             # Vẽ khung viền
                             box_x1 = max(0, image_x - box_size // 2)
@@ -2234,21 +2177,78 @@ async def get_mobile_history_image(record_id: int, download: bool = Query(False)
                             box_x2 = min(actual_image_width, image_x + box_size // 2)
                             box_y2 = min(actual_image_height, image_y + box_size // 2)
                             
-                            # Vẽ khung viền dày 3 pixels
-                            for i in range(3):
-                                draw.rectangle([box_x1 - i, box_y1 - i, box_x2 + i, box_y2 + i], outline=color, width=1)
-                            
-                            # Vẽ label (tùy chọn)
-                            draw.text((box_x1, box_y1 - 15), label, fill=color)
+                            if is_template_match:
+                                # Vẽ khung template match với background transparent (màu nhạt hơn)
+                                from PIL import ImageColor
+                                try:
+                                    rgb_color = ImageColor.getcolor(color, "RGB")
+                                    # Tạo màu nhạt hơn với alpha (transparent background 75%)
+                                    fill_color = (*rgb_color, 64)  # Alpha = 64 (transparent 75%, opacity 25%)
+                                    outline_color = color
+                                except:
+                                    fill_color = None
+                                    outline_color = color
+                                
+                                # Vẽ background transparent trên overlay
+                                if fill_color:
+                                    overlay_draw.rectangle([box_x1, box_y1, box_x2, box_y2], fill=fill_color)
+                                
+                                # Vẽ viền khung template match (nét đứt để phân biệt)
+                                dash_length = 5
+                                gap_length = 3
+                                # Vẽ đường trên
+                                x = box_x1
+                                while x < box_x2:
+                                    overlay_draw.line([(x, box_y1), (min(x + dash_length, box_x2), box_y1)], fill=outline_color, width=2)
+                                    x += dash_length + gap_length
+                                # Vẽ đường dưới
+                                x = box_x1
+                                while x < box_x2:
+                                    overlay_draw.line([(x, box_y2), (min(x + dash_length, box_x2), box_y2)], fill=outline_color, width=2)
+                                    x += dash_length + gap_length
+                                # Vẽ đường trái
+                                y = box_y1
+                                while y < box_y2:
+                                    overlay_draw.line([(box_x1, y), (box_x1, min(y + dash_length, box_y2))], fill=outline_color, width=2)
+                                    y += dash_length + gap_length
+                                # Vẽ đường phải
+                                y = box_y1
+                                while y < box_y2:
+                                    overlay_draw.line([(box_x2, y), (box_x2, min(y + dash_length, box_y2))], fill=outline_color, width=2)
+                                    y += dash_length + gap_length
+                                
+                                # Vẽ label với prefix "TM:" trên overlay
+                                overlay_draw.text((box_x1, box_y1 - 15), f"TM:{label}", fill=outline_color)
+                            else:
+                                # Vẽ khung device coordinates (nét liền) trên image chính
+                                for i in range(3):
+                                    draw.rectangle([box_x1 - i, box_y1 - i, box_x2 + i, box_y2 + i], outline=color, width=1)
+                                
+                                # Vẽ label trên image chính
+                                draw.text((box_x1, box_y1 - 15), label, fill=color)
                     except Exception as e:
                         print(f"Error drawing {label} button box: {e}")
                 
-                # Vẽ khung viền cho các button với màu khác nhau
-                draw_button_box(button_1k_coords_json, "red", "1K")
-                draw_button_box(button_10k_coords_json, "blue", "10K")
-                draw_button_box(button_50k_coords_json, "green", "50K")
-                draw_button_box(button_bet_coords_json, "orange", "Bet")
-                draw_button_box(button_place_bet_coords_json, "purple", "PlaceBet")
+                # Vẽ khung template match trước (nét đứt, background transparent)
+                draw_button_box(button_1k_coords_json, "red", "1K", is_template_match=True)
+                draw_button_box(button_10k_coords_json, "blue", "10K", is_template_match=True)
+                draw_button_box(button_50k_coords_json, "green", "50K", is_template_match=True)
+                draw_button_box(button_bet_coords_json, "orange", "Bet", is_template_match=True)
+                draw_button_box(button_place_bet_coords_json, "purple", "PlaceBet", is_template_match=True)
+                
+                # Composite overlay lên image
+                image_rgba = Image.alpha_composite(image_rgba, overlay)
+                
+                # Vẽ khung viền cho các button với màu khác nhau (device coordinates - nét liền)
+                draw = ImageDraw.Draw(image_rgba)  # Cập nhật draw sau khi composite
+                draw_button_box(button_1k_coords_json, "red", "1K", is_template_match=False)
+                draw_button_box(button_10k_coords_json, "blue", "10K", is_template_match=False)
+                draw_button_box(button_50k_coords_json, "green", "50K", is_template_match=False)
+                draw_button_box(button_bet_coords_json, "orange", "Bet", is_template_match=False)
+                draw_button_box(button_place_bet_coords_json, "purple", "PlaceBet", is_template_match=False)
+                
+                # Convert về RGB để lưu JPEG
+                image = image_rgba.convert("RGB")
                 
                 # Lưu ảnh tạm vào BytesIO
                 import io
@@ -3423,3 +3423,209 @@ async def verify_popup(
 
         print("[Verify Popup Error]", traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Lá»—i verify popup: {exc}")
+
+
+@app.post("/api/mobile/history/analyze-cropped")
+async def analyze_history_cropped(
+    record_id: Optional[int] = Form(None),
+    image: Optional[UploadFile] = File(None),
+):
+    """
+    Phân tích ảnh HISTORY đã crop để trích xuất:
+    - win_loss: win/loss/unknown dựa trên so sánh "Đặt" vs "Kết quả"
+    - bet_amount: giá trị "Tổng đặt"
+    - return: giá trị "Hoàn trả"
+    """
+    try:
+        # Lấy ảnh từ record_id hoặc upload
+        cropped_image = None
+        
+        if record_id:
+            # Lấy ảnh từ database
+            conn = sqlite3.connect("logs.db")
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT image_path, image_type
+                FROM mobile_analysis_history
+                WHERE id = ?
+                """,
+                (record_id,),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row or not row[0]:
+                raise HTTPException(status_code=404, detail="Không tìm thấy record")
+            
+            image_path = row[0]
+            image_type = row[1] if len(row) > 1 else None
+            
+            if image_type != "HISTORY":
+                raise HTTPException(status_code=400, detail="Chỉ hỗ trợ HISTORY image type")
+            
+            if not os.path.exists(image_path):
+                raise HTTPException(status_code=404, detail=f"File ảnh không tồn tại: {image_path}")
+            
+            # Tìm ảnh crop
+            original_dir = Path(image_path).parent
+            original_name = Path(image_path).stem
+            cropped_image_path = original_dir / f"cropped_{original_name}.jpg"
+            
+            if cropped_image_path.exists():
+                cropped_image = Image.open(cropped_image_path)
+            else:
+                # Nếu không có crop, dùng ảnh gốc
+                cropped_image = Image.open(image_path)
+        
+        elif image:
+            # Lấy ảnh từ upload
+            image_data = await image.read()
+            cropped_image = Image.open(io.BytesIO(image_data))
+        else:
+            raise HTTPException(status_code=400, detail="Cần cung cấp record_id hoặc image file")
+        
+        # Gửi ảnh cho ChatGPT Vision để đọc text
+        openai_api_key = get_openai_api_key()
+        
+        # Convert image to base64
+        img_byte_arr = io.BytesIO()
+        cropped_image.save(img_byte_arr, format='JPEG', quality=85)
+        img_byte_arr.seek(0)
+        image_data = img_byte_arr.read()
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        
+        # Prompt cho ChatGPT
+        prompt = """Đọc toàn bộ nội dung trong ảnh này. Ảnh này là màn hình HISTORY đã được crop.
+
+Hãy đọc và trả về JSON với format:
+{
+  "dat": "Xiu" hoặc "Tài" hoặc null nếu không đọc được,
+  "ket_qua": "Xiu" hoặc "Tài" hoặc null nếu không đọc được,
+  "tong_dat": "64,000" hoặc số tiền tổng đặt (có thể có dấu phẩy) hoặc null,
+  "hoan_tra": "0" hoặc số tiền hoàn trả (có thể có dấu phẩy) hoặc null
+}
+
+Chú ý:
+- "Đặt" hoặc "Đặt Xiu"/"Đặt Tài" -> dat
+- "Kết quả" hoặc "Kết quả: Xiu"/"Kết quả: Tài" -> ket_qua
+- "Tổng đặt" -> tong_dat
+- "Hoàn trả" -> hoan_tra
+
+Trả về CHỈ JSON, không có text thêm."""
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_api_key}",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                        "detail": "high",  # Dùng high để đọc text tốt hơn
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 500,
+                },
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Lỗi ChatGPT: {response.text}",
+                )
+            
+            result = response.json()
+            chatgpt_text = result["choices"][0]["message"]["content"]
+        
+        # Parse JSON từ ChatGPT response
+        def parse_json_payload(raw_text: str) -> Dict[str, Any]:
+            if not raw_text:
+                return {}
+            cleaned = raw_text.strip()
+            start = cleaned.find('{')
+            end = cleaned.rfind('}')
+            if start != -1 and end != -1 and end >= start:
+                cleaned = cleaned[start : end + 1]
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                return {}
+            except Exception:
+                return {}
+        
+        parsed = parse_json_payload(chatgpt_text)
+        
+        # Trích xuất các giá trị
+        dat_value = parsed.get("dat") or parsed.get("Đặt")
+        ket_qua_value = parsed.get("ket_qua") or parsed.get("Kết quả") or parsed.get("ket_qua")
+        tong_dat_str = parsed.get("tong_dat") or parsed.get("Tổng đặt") or parsed.get("tong_dat")
+        hoan_tra_str = parsed.get("hoan_tra") or parsed.get("Hoàn trả") or parsed.get("hoan_tra")
+        
+        # Normalize dat và ket_qua (sử dụng hàm normalize_choice đã có sẵn)
+        dat_normalized = normalize_choice(dat_value)
+        ket_qua_normalized = normalize_choice(ket_qua_value)
+        
+        # Tính win_loss
+        win_loss = "unknown"
+        if dat_normalized and ket_qua_normalized:
+            if dat_normalized == ket_qua_normalized:
+                win_loss = "win"
+            else:
+                win_loss = "loss"
+        
+        # Parse bet_amount từ tong_dat
+        bet_amount = "unknown"
+        if tong_dat_str:
+            try:
+                # Loại bỏ dấu phẩy và khoảng trắng
+                tong_dat_clean = str(tong_dat_str).replace(",", "").replace(" ", "").strip()
+                if tong_dat_clean.isdigit():
+                    bet_amount = int(tong_dat_clean)
+            except (ValueError, AttributeError):
+                pass
+        
+        # Parse return từ hoan_tra
+        return_value = "unknown"
+        if hoan_tra_str:
+            try:
+                # Loại bỏ dấu phẩy và khoảng trắng
+                hoan_tra_clean = str(hoan_tra_str).replace(",", "").replace(" ", "").strip()
+                if hoan_tra_clean.isdigit():
+                    return_value = int(hoan_tra_clean)
+            except (ValueError, AttributeError):
+                pass
+        
+        return {
+            "win_loss": win_loss,
+            "bet_amount": bet_amount,
+            "return": return_value,
+            "raw_data": {
+                "dat": dat_value,
+                "ket_qua": ket_qua_value,
+                "tong_dat": tong_dat_str,
+                "hoan_tra": hoan_tra_str,
+            },
+            "chatgpt_response": chatgpt_text,
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+        print("[Analyze History Cropped Error]", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Lỗi phân tích ảnh HISTORY: {exc}")

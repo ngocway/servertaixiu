@@ -22,3 +22,12 @@ echo [Quick Deploy] Done! Server: http://%VPS_IP%:8000/admin
 
 
 
+
+
+
+
+
+
+
+
+

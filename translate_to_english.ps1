@@ -44,3 +44,12 @@ Write-Host "Translation completed!"
 
 
 
+
+
+
+
+
+
+
+
+
