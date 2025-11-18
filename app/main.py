@@ -1731,6 +1731,9 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             saved_coords = mobile_betting_service.get_device_button_coords(device_name)
             should_match, match_counter = mobile_betting_service.should_match_buttons(device_name)
             
+            # Chỉ chạy template matching nếu seconds trong khoảng 34-49
+            should_run_template_matching = (seconds_value >= 34 and seconds_value <= 49)
+            
             # Hàm helper để tìm và tính tọa độ cho một loại button
             def find_button_coords(sample_path: Path, button_name: str):
                 coords = None
@@ -1777,54 +1780,88 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 
                 return coords, error
             
-            # Nút Cược và 1K: LUÔN match mỗi lần
-            print(f"[BETTING] Matching Nút Cược and 1K for device {device_name} (always match)")
-            button_bet_coords, button_bet_error = find_button_coords(Path("samples/sample_bet_button.jpg"), "Nút Cược")
-            button_1k_coords, button_1k_error = find_button_coords(Path("samples/sample_1k.jpg"), "1K")
-            
-            # 10K, 50K, Nút Đặt Cược: chỉ match khi đến lượt (mỗi 10 lần 1 lần)
-            if saved_coords and not should_match:
-                print(f"[BETTING] Using saved button coordinates for 10K/50K/PlaceBet (counter: {match_counter}, skip matching)")
-                button_10k_coords = saved_coords.get('button_10k_coords')
-                button_50k_coords = saved_coords.get('button_50k_coords')
-                button_place_bet_coords = saved_coords.get('button_place_bet_coords')
-                button_10k_error = None
-                button_50k_error = None
-                button_place_bet_error = None
-                print(f"[BETTING] Loaded saved coordinates - 10K: {button_10k_coords}, 50K: {button_50k_coords}, PlaceBet: {button_place_bet_coords}")
+            # Chỉ chạy template matching nếu seconds trong khoảng 34-49
+            if should_run_template_matching:
+                # Nút Cược và 1K: LUÔN match mỗi lần
+                print(f"[BETTING] Matching Nút Cược and 1K for device {device_name} (seconds={seconds_value}, in range 34-49)")
+                button_bet_coords, button_bet_error = find_button_coords(Path("samples/sample_bet_button.jpg"), "Nút Cược")
+                button_1k_coords, button_1k_error = find_button_coords(Path("samples/sample_1k.jpg"), "1K")
+                
+                # 10K, 50K, Nút Đặt Cược: chỉ match khi đến lượt (mỗi 10 lần 1 lần)
+                if saved_coords and not should_match:
+                    print(f"[BETTING] Using saved button coordinates for 10K/50K/PlaceBet (counter: {match_counter}, skip matching)")
+                    button_10k_coords = saved_coords.get('button_10k_coords')
+                    button_50k_coords = saved_coords.get('button_50k_coords')
+                    button_place_bet_coords = saved_coords.get('button_place_bet_coords')
+                    button_10k_error = None
+                    button_50k_error = None
+                    button_place_bet_error = None
+                    print(f"[BETTING] Loaded saved coordinates - 10K: {button_10k_coords}, 50K: {button_50k_coords}, PlaceBet: {button_place_bet_coords}")
+                else:
+                    # Cần match 10K, 50K, Nút Đặt Cược: chưa có tọa độ hoặc đến lượt match (mỗi 10 lần 1 lần)
+                    print(f"[BETTING] Matching 10K/50K/PlaceBet button coordinates for device {device_name} (counter: {match_counter}, should_match: {should_match})")
+                    button_10k_coords, button_10k_error = find_button_coords(Path("samples/sample_10k.jpg"), "10K")
+                    button_50k_coords, button_50k_error = find_button_coords(Path("samples/sample_50k.jpg"), "50K")
+                    button_place_bet_coords, button_place_bet_error = find_button_coords(Path("samples/sample_place_bet_button.jpg"), "Nút Đặt Cược")
             else:
-                # Cần match 10K, 50K, Nút Đặt Cược: chưa có tọa độ hoặc đến lượt match (mỗi 10 lần 1 lần)
-                print(f"[BETTING] Matching 10K/50K/PlaceBet button coordinates for device {device_name} (counter: {match_counter}, should_match: {should_match})")
-                button_10k_coords, button_10k_error = find_button_coords(Path("samples/sample_10k.jpg"), "10K")
-                button_50k_coords, button_50k_error = find_button_coords(Path("samples/sample_50k.jpg"), "50K")
-                button_place_bet_coords, button_place_bet_error = find_button_coords(Path("samples/sample_place_bet_button.jpg"), "Nút Đặt Cược")
+                # Skip template matching vì seconds không trong khoảng 34-49
+                print(f"[BETTING] Skipping template matching for device {device_name} (seconds={seconds_value}, not in range 34-49)")
+                # Sử dụng tọa độ đã lưu nếu có, nếu không thì để None
+                if saved_coords:
+                    button_1k_coords = saved_coords.get('button_1k_coords')
+                    button_10k_coords = saved_coords.get('button_10k_coords')
+                    button_50k_coords = saved_coords.get('button_50k_coords')
+                    button_bet_coords = saved_coords.get('button_bet_coords')
+                    button_place_bet_coords = saved_coords.get('button_place_bet_coords')
+                    button_1k_error = None
+                    button_10k_error = None
+                    button_50k_error = None
+                    button_bet_error = None
+                    button_place_bet_error = None
+                    print(f"[BETTING] Using saved coordinates (seconds={seconds_value} not in 34-49 range)")
+                else:
+                    # Không có tọa độ đã lưu và không chạy template matching
+                    button_1k_coords = None
+                    button_10k_coords = None
+                    button_50k_coords = None
+                    button_bet_coords = None
+                    button_place_bet_coords = None
+                    button_1k_error = f"Seconds ({seconds_value}) không trong khoảng 34-49, không chạy template matching. Cần tọa độ đã lưu hoặc chờ seconds trong khoảng 34-49."
+                    button_10k_error = button_1k_error
+                    button_50k_error = button_1k_error
+                    button_bet_error = button_1k_error
+                    button_place_bet_error = button_1k_error
             
-            # Lưu tọa độ vào database
-            # Nếu đã match 10K/50K/PlaceBet lần này, lưu tất cả (bao gồm cả Nút Cược và 1K mới match)
-            # Nếu skip match 10K/50K/PlaceBet, chỉ cần cập nhật Nút Cược và 1K mới match, giữ nguyên các button khác
-            if saved_coords and not should_match:
-                # Skip match: chỉ cập nhật Nút Cược và 1K, giữ nguyên các button khác từ saved_coords
-                coords_to_save = {
-                    'button_1k_coords': button_1k_coords,  # Luôn cập nhật 1K
-                    'button_10k_coords': saved_coords.get('button_10k_coords'),
-                    'button_50k_coords': saved_coords.get('button_50k_coords'),
-                    'button_bet_coords': button_bet_coords,  # Luôn cập nhật Nút Cược
-                    'button_place_bet_coords': saved_coords.get('button_place_bet_coords')
-                }
+            # Lưu tọa độ vào database (chỉ khi đã chạy template matching)
+            if should_run_template_matching:
+                # Nếu đã match 10K/50K/PlaceBet lần này, lưu tất cả (bao gồm cả Nút Cược và 1K mới match)
+                # Nếu skip match 10K/50K/PlaceBet, chỉ cần cập nhật Nút Cược và 1K mới match, giữ nguyên các button khác
+                if saved_coords and not should_match:
+                    # Skip match: chỉ cập nhật Nút Cược và 1K, giữ nguyên các button khác từ saved_coords
+                    coords_to_save = {
+                        'button_1k_coords': button_1k_coords,  # Luôn cập nhật 1K
+                        'button_10k_coords': saved_coords.get('button_10k_coords'),
+                        'button_50k_coords': saved_coords.get('button_50k_coords'),
+                        'button_bet_coords': button_bet_coords,  # Luôn cập nhật Nút Cược
+                        'button_place_bet_coords': saved_coords.get('button_place_bet_coords')
+                    }
+                else:
+                    # Đã match: lưu tất cả các button đã match
+                    coords_to_save = {
+                        'button_1k_coords': button_1k_coords,  # Luôn cập nhật 1K
+                        'button_10k_coords': button_10k_coords,
+                        'button_50k_coords': button_50k_coords,
+                        'button_bet_coords': button_bet_coords,  # Luôn cập nhật Nút Cược
+                        'button_place_bet_coords': button_place_bet_coords
+                    }
+                
+                # Chỉ lưu nếu có ít nhất 1 tọa độ
+                if any(coords_to_save.values()):
+                    mobile_betting_service.save_device_button_coords(device_name, coords_to_save)
+                    print(f"[BETTING] Saved button coordinates for device {device_name} - 1K: {coords_to_save['button_1k_coords']}, 10K: {coords_to_save['button_10k_coords']}, 50K: {coords_to_save['button_50k_coords']}, Bet: {coords_to_save['button_bet_coords']}, PlaceBet: {coords_to_save['button_place_bet_coords']}")
             else:
-                # Đã match: lưu tất cả các button đã match
-                coords_to_save = {
-                    'button_1k_coords': button_1k_coords,  # Luôn cập nhật 1K
-                    'button_10k_coords': button_10k_coords,
-                    'button_50k_coords': button_50k_coords,
-                    'button_bet_coords': button_bet_coords,  # Luôn cập nhật Nút Cược
-                    'button_place_bet_coords': button_place_bet_coords
-                }
-            
-            # Chỉ lưu nếu có ít nhất 1 tọa độ
-            if any(coords_to_save.values()):
-                mobile_betting_service.save_device_button_coords(device_name, coords_to_save)
-                print(f"[BETTING] Saved button coordinates for device {device_name} - 1K: {coords_to_save['button_1k_coords']}, 10K: {coords_to_save['button_10k_coords']}, 50K: {coords_to_save['button_50k_coords']}, Bet: {coords_to_save['button_bet_coords']}, PlaceBet: {coords_to_save['button_place_bet_coords']}")
+                # Không chạy template matching, không lưu tọa độ mới
+                print(f"[BETTING] Skipping save button coordinates (seconds={seconds_value} not in 34-49 range)")
 
             mobile_betting_service.save_analysis_history(
                 {
