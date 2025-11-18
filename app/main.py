@@ -2183,6 +2183,14 @@ async def get_mobile_history_image(record_id: int, download: bool = Query(False)
                     try:
                         coords = json.loads(coords_json) if isinstance(coords_json, str) else coords_json
                         if coords and isinstance(coords, dict):
+                            # Kiểm tra xem có thông tin template matching không (scale và method)
+                            # Chỉ vẽ khung nếu có scale và method (tức là đã chạy template matching)
+                            has_template_match_info = "scale" in coords and "method" in coords
+                            
+                            # Nếu không có thông tin template matching, không vẽ khung
+                            if not has_template_match_info:
+                                return
+                            
                             if is_template_match:
                                 # Vẽ khung tại vị trí template match (image coordinates gốc)
                                 if "template_match_x" in coords and "template_match_y" in coords:
