@@ -418,7 +418,7 @@ def _build_dashboard_html() -> str:
                 <table>
                     <thead>
                         <tr>
-                            <th>ID</th>
+                            <th>Time</th>
                             <th>Device</th>
                             <th>Image Type</th>
                             <th class=\"center\">Seconds</th>
@@ -708,6 +708,48 @@ def _build_dashboard_html() -> str:
         let allHistoryData = [];
         let filteredHistoryData = [];
 
+        // Hàm rút gọn device name: 3 ký tự đầu + ... + 4 ký tự cuối
+        function shortenDeviceName(deviceName) {
+            if (!deviceName || deviceName === '-') return deviceName;
+            if (deviceName.length <= 7) return deviceName; // Nếu quá ngắn thì giữ nguyên
+            return deviceName.substring(0, 3) + '...' + deviceName.substring(deviceName.length - 4);
+        }
+
+        // Hàm format thời gian: 15:30:45 30/12 (UTC+7)
+        function formatCaptureTime(createdAt) {
+            if (!createdAt) return '-';
+            try {
+                // Parse timestamp từ database
+                // SQLite lưu dưới dạng ISO string (UTC), ví dụ: "2024-12-30 08:30:45"
+                // Nếu có 'Z' hoặc timezone info, parse trực tiếp
+                // Nếu không, giả sử là UTC và thêm 'Z' để parse đúng
+                let dateStr = String(createdAt);
+                if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
+                    // Không có timezone info, giả sử là UTC
+                    dateStr = dateStr.replace(' ', 'T') + 'Z';
+                }
+                let date = new Date(dateStr);
+                
+                // Nếu không parse được, return '-'
+                if (isNaN(date.getTime())) return '-';
+                
+                // Convert sang UTC+7 (Vietnam timezone): thêm 7 giờ
+                const vietnamOffset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
+                const vietnamTime = new Date(date.getTime() + vietnamOffset);
+                
+                // Format: HH:mm:ss DD/MM
+                const hours = String(vietnamTime.getUTCHours()).padStart(2, '0');
+                const minutes = String(vietnamTime.getUTCMinutes()).padStart(2, '0');
+                const seconds = String(vietnamTime.getUTCSeconds()).padStart(2, '0');
+                const day = String(vietnamTime.getUTCDate()).padStart(2, '0');
+                const month = String(vietnamTime.getUTCMonth() + 1).padStart(2, '0');
+                
+                return `${hours}:${minutes}:${seconds} ${day}/${month}`;
+            } catch (e) {
+                return '-';
+            }
+        }
+
         async function loadHistory(page = 1) {
             currentPage = page;
             const limit = parseInt(document.getElementById('history-limit').value);
@@ -739,7 +781,7 @@ def _build_dashboard_html() -> str:
                 uniqueDevices.forEach(device => {
                     const option = document.createElement('option');
                     option.value = device;
-                    option.textContent = device;
+                    option.textContent = shortenDeviceName(device);
                     deviceSelect.appendChild(option);
                 });
                 
@@ -781,7 +823,7 @@ def _build_dashboard_html() -> str:
                 document.getElementById('stat-devices').textContent = uniqueDevices.length;
 
                 if (paginatedHistory.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" class="empty">No data available</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="8" class="empty">No data available</td></tr>';
                     renderPagination(1, 0);
                     return;
                 }
@@ -813,8 +855,8 @@ def _build_dashboard_html() -> str:
                     const returnValue = record.return !== null && record.return !== undefined ? formatNumber(record.return) : '-';
 
                     tr.innerHTML = `
-                        <td>#${record.id}</td>
-                        <td>${record.device_name || '-'}</td>
+                        <td>${formatCaptureTime(record.created_at)}</td>
+                        <td>${shortenDeviceName(record.device_name) || '-'}</td>
                         <td><span class="tag ${tagClass}">${tagLabel}</span></td>
                         <td class="center">${seconds}</td>
                         <td class="right">${formatNumber(planned)}</td>
