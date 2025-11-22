@@ -829,6 +829,105 @@ class MobileBettingService:
         
         return None
     
+    def get_latest_history_record_with_return_zero(self, device_name: str) -> Optional[Dict]:
+        """
+        Lấy record HISTORY gần nhất của device có return = 0
+        
+        Returns:
+            Dict với các giá trị: win_loss, column_5, bet_amount
+            hoặc None nếu không tìm thấy
+        """
+        import re
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Query các record HISTORY của device này, sắp xếp theo thời gian giảm dần
+        cursor.execute("""
+            SELECT id, chatgpt_response, bet_amount, win_loss, created_at
+            FROM mobile_analysis_history
+            WHERE device_name = ? AND image_type = 'HISTORY'
+            ORDER BY created_at DESC
+            LIMIT 100
+        """, (device_name,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # Parse từ chatgpt_response để tìm record có return = 0
+        for row in rows:
+            record_id, chatgpt_response, bet_amount, win_loss, created_at = row
+            
+            if not chatgpt_response:
+                continue
+            
+            # Parse JSON từ chatgpt_response
+            try:
+                import json as json_lib
+                # Tìm JSON object trong chatgpt_response
+                cleaned = chatgpt_response.strip()
+                start = cleaned.find('{')
+                end = cleaned.rfind('}')
+                if start != -1 and end != -1 and end >= start:
+                    cleaned = cleaned[start : end + 1]
+                    parsed = json_lib.loads(cleaned)
+                    
+                    return_val = parsed.get("hoan_tra") or parsed.get("Hoàn trả") or parsed.get("return")
+                    column_5 = parsed.get("column_5")
+                    
+                    # Chuyển đổi return_val thành số nếu là string
+                    if isinstance(return_val, str):
+                        return_val_clean = return_val.replace(",", "").replace(" ", "").strip()
+                        try:
+                            return_val = int(return_val_clean) if return_val_clean.isdigit() else None
+                        except (ValueError, AttributeError):
+                            return_val = None
+                    
+                    # Kiểm tra điều kiện: return = 0 và có column_5 hợp lệ
+                    if return_val == 0 and column_5 and column_5 not in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>", ""]:
+                        return {
+                            'win_loss': win_loss,
+                            'column_5': column_5,
+                            'bet_amount': bet_amount,
+                            'record_id': record_id
+                        }
+            except Exception:
+                # Nếu parse JSON thất bại, thử parse bằng regex
+                try:
+                    # Tìm return
+                    return_patterns = [
+                        r'"hoan_tra"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                        r'"Hoàn trả"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                        r'"return"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                        r'Hoàn trả.*?(\d{1,3}(?:,\d{3})*)',
+                        r'hoàn trả.*?(\d{1,3}(?:,\d{3})*)',
+                    ]
+                    return_val = None
+                    for pattern in return_patterns:
+                        return_match = re.search(pattern, chatgpt_response, re.IGNORECASE)
+                        if return_match:
+                            return_str = return_match.group(1).replace(",", "").replace(" ", "").strip()
+                            if return_str.isdigit():
+                                return_val = int(return_str)
+                                break
+                    
+                    # Tìm column_5
+                    column5_match = re.search(r'"column_5"\s*:\s*"([^"]*)"', chatgpt_response)
+                    column_5 = column5_match.group(1) if column5_match else None
+                    
+                    # Kiểm tra điều kiện: return = 0 và có column_5 hợp lệ
+                    if return_val == 0 and column_5 and column_5 not in ["unknown", "<noi dung cot thu 5>", "<nội dung cột thứ 5>", ""]:
+                        return {
+                            'win_loss': win_loss,
+                            'column_5': column_5,
+                            'bet_amount': bet_amount,
+                            'record_id': record_id
+                        }
+                except Exception:
+                    continue
+        
+        return None
+    
     def save_device_button_coords(self, device_name: str, coords: Dict):
         """
         Lưu tọa độ button cho device

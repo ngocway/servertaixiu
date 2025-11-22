@@ -1690,6 +1690,64 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 if not session_id_for_db.startswith("#"):
                     session_id_for_db = f"#{session_id_for_db}"
 
+            # Parse return value từ ChatGPT response
+            return_value = None
+            try:
+                # Ưu tiên lấy từ parsed JSON
+                return_value = parsed_response.get("return") or parsed_response.get("hoan_tra") or parsed_response.get("Hoàn trả")
+                
+                # Nếu không có trong parsed JSON, tìm trong text
+                if return_value is None and chatgpt_text:
+                    hoan_tra_patterns = [
+                        r'"hoan_tra"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                        r'"Hoàn trả"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                        r'"return"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                        r'Hoàn trả.*?(\d{1,3}(?:,\d{3})*)',
+                        r'hoàn trả.*?(\d{1,3}(?:,\d{3})*)',
+                    ]
+                    for pattern in hoan_tra_patterns:
+                        hoan_tra_match = re.search(pattern, chatgpt_text, re.IGNORECASE)
+                        if hoan_tra_match:
+                            hoan_tra_str = hoan_tra_match.group(1).replace(",", "").replace(" ", "").strip()
+                            if hoan_tra_str.isdigit():
+                                return_value = int(hoan_tra_str)
+                                break
+                
+                # Chuyển đổi return_value thành số nếu là string
+                if isinstance(return_value, str):
+                    return_value_clean = return_value.replace(",", "").replace(" ", "").strip()
+                    if return_value_clean.isdigit():
+                        return_value = int(return_value_clean)
+                    else:
+                        return_value = None
+            except Exception as e:
+                print(f"Error parsing return value: {e}")
+                return_value = None
+
+            # Nếu return != 0, tìm record gần nhất có return = 0 và lấy bet_amount, win_loss, column_5
+            if return_value is not None and return_value != 0:
+                latest_record_with_return_zero = mobile_betting_service.get_latest_history_record_with_return_zero(device_name)
+                if latest_record_with_return_zero:
+                    # Lấy bet_amount, win_loss, column_5 từ record có return = 0
+                    bet_amount_value = latest_record_with_return_zero.get('bet_amount')
+                    column_5 = latest_record_with_return_zero.get('column_5')
+                    win_loss_from_zero = latest_record_with_return_zero.get('win_loss')
+                    
+                    # Cập nhật win_loss_token và win_loss_label từ record có return = 0
+                    if win_loss_from_zero:
+                        # Chuyển đổi từ label sang token nếu cần (win_loss_from_zero có thể là "Win", "Loss", "Thắng", "Thua", hoặc "win", "loss")
+                        win_loss_token = win_token_from_label(win_loss_from_zero)
+                        if not win_loss_token:
+                            # Nếu không convert được, thử chuyển về lowercase
+                            win_loss_lower = str(win_loss_from_zero).lower()
+                            if win_loss_lower in ['win', 'loss', 'unknown']:
+                                win_loss_token = win_loss_lower
+                            else:
+                                win_loss_token = "unknown"
+                        win_loss_label = win_label_from_token(win_loss_token)
+                    
+                    print(f"[HISTORY] Return value = {return_value} != 0, using bet_amount={bet_amount_value}, win_loss={win_loss_token}, column_5 from record with return=0 (record_id={latest_record_with_return_zero.get('record_id')})")
+
             bet_amount_for_calc = bet_amount_value if bet_amount_value is not None else 0
 
             multiplier = mobile_betting_service.calculate_multiplier(
@@ -1710,9 +1768,6 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                     cropped_image_path = str(cropped_image_path)
                 except Exception as exc:
                     print(f"Error saving cropped HISTORY image: {exc}")
-
-            # win_loss đã được tính từ dữ liệu của record hiện tại ở trên (dòng 1654-1734)
-            # Không copy bất kỳ dữ liệu nào từ record trước
 
             mobile_betting_service.save_analysis_history(
                 {
@@ -1741,6 +1796,7 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 "bet_amount": bet_amount_value,
                 "win_loss": win_loss_token,
                 "column_5": column_5,  # Nội dung cột thứ 5 (toàn bộ nội dung đọc được từ ảnh)
+                "return": return_value,  # Thêm return value vào response
             }
             
 
