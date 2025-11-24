@@ -1914,9 +1914,21 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                     print(f"[BETTING] Saved best template method for device {device_name}: {new_best_method}")
                     best_method = new_best_method  # Cập nhật để dùng cho các button tiếp theo
                 
-                # 10K, 50K, Nút Đặt Cược: chỉ match khi đến lượt (mỗi 10 lần 1 lần)
-                if saved_coords and not should_match:
-                    print(f"[BETTING] Using saved button coordinates for 10K/50K/PlaceBet (counter: {match_counter}, skip matching)")
+                # 10K, 50K, Nút Đặt Cược: match khi đến lượt (mỗi 10 lần 1 lần) HOẶC khi thiếu tọa độ
+                # Kiểm tra xem có đầy đủ tọa độ 10K, 50K, Đặt Cược không
+                has_all_coords = False
+                if saved_coords:
+                    button_10k_coords_saved = saved_coords.get('button_10k_coords')
+                    button_50k_coords_saved = saved_coords.get('button_50k_coords')
+                    button_place_bet_coords_saved = saved_coords.get('button_place_bet_coords')
+                    # Kiểm tra cả 3 nút đều có tọa độ (không None và không rỗng)
+                    has_all_coords = (button_10k_coords_saved is not None and 
+                                     button_50k_coords_saved is not None and 
+                                     button_place_bet_coords_saved is not None)
+                
+                # Nếu có đầy đủ tọa độ VÀ không phải lượt match → dùng tọa độ đã lưu (logic cũ)
+                if has_all_coords and not should_match:
+                    print(f"[BETTING] Using saved button coordinates for 10K/50K/PlaceBet (counter: {match_counter}, skip matching - all coords available)")
                     button_10k_coords = saved_coords.get('button_10k_coords')
                     button_50k_coords = saved_coords.get('button_50k_coords')
                     button_place_bet_coords = saved_coords.get('button_place_bet_coords')
@@ -1925,9 +1937,11 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                     button_place_bet_error = None
                     print(f"[BETTING] Loaded saved coordinates - 10K: {button_10k_coords}, 50K: {button_50k_coords}, PlaceBet: {button_place_bet_coords}")
                 else:
-                    # Cần match 10K, 50K, Nút Đặt Cược: chưa có tọa độ hoặc đến lượt match (mỗi 10 lần 1 lần)
-                    # Dùng best_method đã có (không phải lần đầu nữa)
-                    print(f"[BETTING] Matching 10K/50K/PlaceBet button coordinates for device {device_name} (counter: {match_counter}, should_match: {should_match}, best_method={best_method or 'not set'})")
+                    # Cần match 10K, 50K, Nút Đặt Cược: 
+                    # - Đến lượt match (mỗi 10 lần 1 lần) HOẶC
+                    # - Thiếu tọa độ (chưa có đầy đủ 3 nút)
+                    match_reason = "scheduled match (every 10 times)" if should_match else "missing coordinates"
+                    print(f"[BETTING] Matching 10K/50K/PlaceBet button coordinates for device {device_name} (counter: {match_counter}, reason: {match_reason}, best_method={best_method or 'not set'})")
                     button_10k_coords, button_10k_error = find_button_coords(Path("samples/sample_10k.jpg"), "10K", is_first_match=False)
                     button_50k_coords, button_50k_error = find_button_coords(Path("samples/sample_50k.jpg"), "50K", is_first_match=False)
                     button_place_bet_coords, button_place_bet_error = find_button_coords(Path("samples/sample_place_bet_button.jpg"), "Nút Đặt Cược", is_first_match=False)
@@ -1963,8 +1977,8 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
             # Lưu tọa độ vào database (chỉ khi đã chạy template matching)
             if should_run_template_matching:
                 # Nếu đã match 10K/50K/PlaceBet lần này, lưu tất cả (bao gồm cả Nút Cược và 1K mới match)
-                # Nếu skip match 10K/50K/PlaceBet, chỉ cần cập nhật Nút Cược và 1K mới match, giữ nguyên các button khác
-                if saved_coords and not should_match:
+                # Nếu skip match 10K/50K/PlaceBet (có đầy đủ tọa độ và không phải lượt match), chỉ cần cập nhật Nút Cược và 1K mới match, giữ nguyên các button khác
+                if has_all_coords and not should_match:
                     # Skip match: chỉ cập nhật Nút Cược và 1K, giữ nguyên các button khác từ saved_coords
                     coords_to_save = {
                         'button_1k_coords': button_1k_coords,  # Luôn cập nhật 1K
@@ -1974,7 +1988,7 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                         'button_place_bet_coords': saved_coords.get('button_place_bet_coords')
                     }
                 else:
-                    # Đã match: lưu tất cả các button đã match
+                    # Đã match: lưu tất cả các button đã match (bao gồm cả trường hợp match do thiếu tọa độ)
                     coords_to_save = {
                         'button_1k_coords': button_1k_coords,  # Luôn cập nhật 1K
                         'button_10k_coords': button_10k_coords,
