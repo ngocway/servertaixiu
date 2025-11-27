@@ -176,9 +176,24 @@ def _build_dashboard_html() -> str:
         pre { background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 20px; overflow: auto; }
         .sample-images-container {
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
+            grid-template-columns: repeat(3, 1fr);
             gap: 16px;
             margin-bottom: 32px;
+        }
+        @media (max-width: 1200px) {
+            .sample-images-container {
+                grid-template-columns: repeat(3, 1fr);
+                gap: 12px;
+            }
+            .sample-image-card {
+                padding: 20px;
+            }
+            .sample-image-card h3 {
+                font-size: 1rem;
+            }
+            .sample-image-card p.muted {
+                font-size: 0.8rem;
+            }
         }
         .sample-image-card {
             background: white;
@@ -305,6 +320,16 @@ def _build_dashboard_html() -> str:
                 </div>
                 <div id=\"history-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
             </div>
+            <div class=\"sample-image-card\" style=\"border-left: 5px solid #f59e0b;\">
+                <h3 style=\"margin-top: 0;\">📸 RETURN Sample Image</h3>
+                <p class=\"muted\">Upload a sample RETURN image. This image will be used as a reference for return-related processing.</p>
+                <div style=\"display: flex; gap: 16px; align-items: center; flex-wrap: wrap;\">
+                    <input type=\"file\" id=\"return-sample-input\" accept=\"image/*\" style=\"display: none;\" onchange=\"uploadReturnSample()\">
+                    <button class=\"primary\" onclick=\"document.getElementById('return-sample-input').click()\">📤 Upload/Replace Sample</button>
+                    <div id=\"return-sample-status\" style=\"flex: 1; min-width: 200px;\"></div>
+                </div>
+                <div id=\"return-sample-preview\" style=\"margin-top: 16px; text-align: center;\"></div>
+            </div>
         </div>
         <div class=\"card desktop-only\" style=\"border-left: 5px solid #f59e0b;\">
             <h3 style=\"margin-top: 0;\">🖼️ Ảnh Mẫu (Drag & Drop)</h3>
@@ -412,6 +437,21 @@ def _build_dashboard_html() -> str:
                         <option value=\"100\">100</option>
                     </select>
                     latest records
+                </label>
+                <label>
+                    Date
+                    <select id=\"filter-date\" onchange=\"loadHistory(1)\">
+                        <option value=\"today\">Today</option>
+                        <option value=\"yesterday\" selected>Yesterday</option>
+                        <option value=\"last7days\">Last 7 days</option>
+                        <option value=\"last30days\">Last 30 days</option>
+                        <option value=\"all\">All</option>
+                    </select>
+                </label>
+                <label style=\"display: flex; align-items: center; gap: 8px;\">
+                    Time
+                    <input type=\"time\" id=\"filter-time\" style=\"padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;\" onchange=\"loadHistory(1)\" />
+                    <button class=\"secondary small\" onclick=\"resetDateTimeFilter()\" style=\"padding: 6px 12px; font-size: 13px;\">🔄 Reset</button>
                 </label>
             </div>
             <div class=\"table-wrapper\">
@@ -564,6 +604,51 @@ def _build_dashboard_html() -> str:
             }
         }
 
+        async function uploadReturnSample() {
+            const input = document.getElementById('return-sample-input');
+            const file = input.files[0];
+            if (!file) return;
+
+            const statusDiv = document.getElementById('return-sample-status');
+            statusDiv.innerHTML = '<span style="color: #64748b;">Uploading...</span>';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const resp = await fetch('/api/mobile/return-sample/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await resp.json();
+                
+                if (resp.ok && data.success) {
+                    statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 600;">✓ Uploaded successfully!</span>';
+                    loadReturnSamplePreview();
+                } else {
+                    statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${data.detail || 'Upload failed'}</span>`;
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${error.message}</span>`;
+            }
+        }
+
+        async function loadReturnSamplePreview() {
+            const previewDiv = document.getElementById('return-sample-preview');
+            try {
+                const resp = await fetch('/api/mobile/return-sample');
+                if (resp.ok) {
+                    const blob = await resp.blob();
+                    const url = URL.createObjectURL(blob);
+                    previewDiv.innerHTML = `<img src="${url}" alt="Return Sample" style="max-width: 100%; max-height: 400px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />`;
+                } else {
+                    previewDiv.innerHTML = '<p class="muted">No sample image uploaded yet.</p>';
+                }
+            } catch (error) {
+                previewDiv.innerHTML = '<p class="muted">No sample image uploaded yet.</p>';
+            }
+        }
+
         // Drag & Drop handlers for sample images
         function handleDrop(event, type) {
             event.preventDefault();
@@ -687,9 +772,21 @@ def _build_dashboard_html() -> str:
         }
         
         document.addEventListener('DOMContentLoaded', () => {
+            // Initialize time filter với thời gian hiện tại
+            const now = new Date();
+            const vietnamOffset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
+            const vietnamTime = new Date(now.getTime() + vietnamOffset);
+            const hours = String(vietnamTime.getUTCHours()).padStart(2, '0');
+            const minutes = String(vietnamTime.getUTCMinutes()).padStart(2, '0');
+            const timeInput = document.getElementById('filter-time');
+            if (timeInput) {
+                timeInput.value = `${hours}:${minutes}`;
+            }
+            
             loadHistory();
             loadBettingSamplePreview();
             loadHistorySamplePreview();
+            loadReturnSamplePreview();
             // Load sample previews
             loadSamplePreview('1k');
             loadSamplePreview('10k');
@@ -750,12 +847,31 @@ def _build_dashboard_html() -> str:
             }
         }
 
+        // Hàm reset Date và Time filter về ngày và thời gian hiện tại
+        function resetDateTimeFilter() {
+            // Reset Date về "Today"
+            document.getElementById('filter-date').value = 'today';
+            
+            // Reset Time về thời gian hiện tại (UTC+7)
+            const now = new Date();
+            const vietnamOffset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
+            const vietnamTime = new Date(now.getTime() + vietnamOffset);
+            const hours = String(vietnamTime.getUTCHours()).padStart(2, '0');
+            const minutes = String(vietnamTime.getUTCMinutes()).padStart(2, '0');
+            document.getElementById('filter-time').value = `${hours}:${minutes}`;
+            
+            // Reload history với filter mới
+            loadHistory(1);
+        }
+
         async function loadHistory(page = 1) {
             currentPage = page;
             const limit = parseInt(document.getElementById('history-limit').value);
             const filterImageType = document.getElementById('filter-image-type').value;
             const filterDevice = document.getElementById('filter-device').value;
             const filterResult = document.getElementById('filter-result').value;
+            const filterDate = document.getElementById('filter-date').value;
+            const filterTime = document.getElementById('filter-time').value;
             const tbody = document.getElementById('history-body');
             tbody.innerHTML = '<tr><td colspan="8" class="empty">Äang táº£i dá»¯ liá»‡u...</td></tr>';
             try {
@@ -809,6 +925,111 @@ def _build_dashboard_html() -> str:
                             return !recordResult || recordResult === '-' || recordResult === 'Unknown';
                         }
                         return recordResult === filterResult;
+                    });
+                }
+
+                // Filter by Date
+                if (filterDate && filterDate !== 'all') {
+                    const now = new Date();
+                    const vietnamOffset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
+                    const vietnamNow = new Date(now.getTime() + vietnamOffset);
+                    let startDate = new Date(vietnamNow);
+                    startDate.setUTCHours(0, 0, 0, 0);
+                    
+                    if (filterDate === 'today') {
+                        // Filter records from today (00:00:00 to now)
+                        filteredHistoryData = filteredHistoryData.filter(record => {
+                            try {
+                                let dateStr = String(record.created_at);
+                                if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
+                                    dateStr = dateStr.replace(' ', 'T') + 'Z';
+                                }
+                                const recordDate = new Date(dateStr);
+                                if (isNaN(recordDate.getTime())) return false;
+                                const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
+                                return recordVietnamTime >= startDate && recordVietnamTime <= vietnamNow;
+                            } catch (e) {
+                                return false;
+                            }
+                        });
+                    } else if (filterDate === 'yesterday') {
+                        // Filter records from yesterday
+                        startDate.setUTCDate(startDate.getUTCDate() - 1);
+                        const endDate = new Date(startDate);
+                        endDate.setUTCDate(endDate.getUTCDate() + 1);
+                        filteredHistoryData = filteredHistoryData.filter(record => {
+                            try {
+                                let dateStr = String(record.created_at);
+                                if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
+                                    dateStr = dateStr.replace(' ', 'T') + 'Z';
+                                }
+                                const recordDate = new Date(dateStr);
+                                if (isNaN(recordDate.getTime())) return false;
+                                const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
+                                return recordVietnamTime >= startDate && recordVietnamTime < endDate;
+                            } catch (e) {
+                                return false;
+                            }
+                        });
+                    } else if (filterDate === 'last7days') {
+                        startDate.setUTCDate(startDate.getUTCDate() - 7);
+                        filteredHistoryData = filteredHistoryData.filter(record => {
+                            try {
+                                let dateStr = String(record.created_at);
+                                if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
+                                    dateStr = dateStr.replace(' ', 'T') + 'Z';
+                                }
+                                const recordDate = new Date(dateStr);
+                                if (isNaN(recordDate.getTime())) return false;
+                                const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
+                                return recordVietnamTime >= startDate && recordVietnamTime <= vietnamNow;
+                            } catch (e) {
+                                return false;
+                            }
+                        });
+                    } else if (filterDate === 'last30days') {
+                        startDate.setUTCDate(startDate.getUTCDate() - 30);
+                        filteredHistoryData = filteredHistoryData.filter(record => {
+                            try {
+                                let dateStr = String(record.created_at);
+                                if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
+                                    dateStr = dateStr.replace(' ', 'T') + 'Z';
+                                }
+                                const recordDate = new Date(dateStr);
+                                if (isNaN(recordDate.getTime())) return false;
+                                const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
+                                return recordVietnamTime >= startDate && recordVietnamTime <= vietnamNow;
+                            } catch (e) {
+                                return false;
+                            }
+                        });
+                    }
+                }
+
+                // Filter by Time (if time is set, filter records after that time on the selected date)
+                if (filterTime) {
+                    const [hours, minutes] = filterTime.split(':').map(Number);
+                    filteredHistoryData = filteredHistoryData.filter(record => {
+                        try {
+                            let dateStr = String(record.created_at);
+                            if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
+                                dateStr = dateStr.replace(' ', 'T') + 'Z';
+                            }
+                            const recordDate = new Date(dateStr);
+                            if (isNaN(recordDate.getTime())) return false;
+                            const vietnamOffset = 7 * 60 * 60 * 1000;
+                            const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
+                            const recordHours = recordVietnamTime.getUTCHours();
+                            const recordMinutes = recordVietnamTime.getUTCMinutes();
+                            
+                            // Compare time: record time should be >= filter time
+                            if (recordHours > hours || (recordHours === hours && recordMinutes >= minutes)) {
+                                return true;
+                            }
+                            return false;
+                        } catch (e) {
+                            return false;
+                        }
                     });
                 }
 
@@ -1133,6 +1354,7 @@ def _build_dashboard_html() -> str:
                 content.textContent = error.message;
             }
         }
+
 
         function copyJson() {
             const content = document.getElementById('modal-json-content').textContent;
@@ -1668,27 +1890,11 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 
                 return dat_value, ket_qua_value
 
-            # Tính win_loss chỉ dựa vào column_5
-            win_loss_token = "unknown"
-            
-            # Parse column_5 để tính win_loss
-            dat_value, ket_qua_value = parse_dat_ket_qua(column_5)
-            if dat_value and ket_qua_value:
-                dat_normalized = normalize_choice(dat_value)
-                ket_qua_normalized = normalize_choice(ket_qua_value)
-                if dat_normalized and ket_qua_normalized:
-                    if dat_normalized == ket_qua_normalized:
-                        win_loss_token = "win"
-                    else:
-                        win_loss_token = "loss"
-
-            win_loss_label = win_label_from_token(win_loss_token)
-
             session_id_for_db = None
             if session_id_clean:
                 session_id_for_db = session_id_clean
                 if not session_id_for_db.startswith("#"):
-                    session_id_for_db = f"#{session_id_for_db}"
+                    session_id_for_db = f"#{session_id_clean}"
 
             # Parse return value từ ChatGPT response
             return_value = None
@@ -1720,18 +1926,43 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                         return_value = int(return_value_clean)
                     else:
                         return_value = None
+                
+                # Nếu vẫn không parse được, thử parse từ column_5 (chỉ để xác định return, KHÔNG dùng để tính win_loss)
+                if return_value is None and column_5:
+                    try:
+                        # Tìm "Hoàn trả" trong column_5
+                        hoan_tra_in_column5 = re.search(r'Hoàn trả\s*[:\s]*(\d{1,3}(?:,\d{3})*)', column_5, re.IGNORECASE)
+                        if hoan_tra_in_column5:
+                            hoan_tra_str = hoan_tra_in_column5.group(1).replace(",", "").replace(" ", "").strip()
+                            if hoan_tra_str.isdigit():
+                                return_value = int(hoan_tra_str)
+                                print(f"[HISTORY] Parsed return_value = {return_value} from column_5")
+                    except Exception as e:
+                        print(f"Error parsing return from column_5: {e}")
             except Exception as e:
                 print(f"Error parsing return value: {e}")
                 return_value = None
 
-            # Nếu return != 0, tìm record gần nhất có return = 0 và lấy bet_amount, win_loss, column_5
+            # Debug log để kiểm tra return_value
+            print(f"[HISTORY] Final parsed return_value = {return_value} (type: {type(return_value)}) for device {device_name}")
+
+            # Tính win_loss và bet_amount dựa vào return value
+            win_loss_token = "unknown"
+            win_loss_label = "Unknown"
+            
+            # Logic mới: Nếu JSON HISTORY có return != 0, quét các JSON HISTORY cùng device_name từ gần nhất đến xa nhất
+            # Tìm JSON HISTORY gần nhất có return = 0, lấy bet_amount và win_loss từ đó đè lên JSON hiện tại
             if return_value is not None and return_value != 0:
+                # JSON HISTORY hiện tại có return != 0: Quét tìm JSON HISTORY cùng device_name có return = 0 gần nhất
+                print(f"[HISTORY] JSON HISTORY hiện tại có return = {return_value} != 0. Đang quét các JSON HISTORY cùng device_name {device_name} từ gần nhất đến xa nhất để tìm JSON có return = 0...")
                 latest_record_with_return_zero = mobile_betting_service.get_latest_history_record_with_return_zero(device_name)
                 if latest_record_with_return_zero:
-                    # Lấy bet_amount, win_loss, column_5 từ record có return = 0
-                    bet_amount_value = latest_record_with_return_zero.get('bet_amount')
-                    column_5 = latest_record_with_return_zero.get('column_5')
+                    # Tìm thấy JSON HISTORY có return = 0 gần nhất: Lấy bet_amount và win_loss từ đó
+                    bet_amount_from_return_zero = latest_record_with_return_zero.get('bet_amount')
                     win_loss_from_zero = latest_record_with_return_zero.get('win_loss')
+                    
+                    # Đè lên giá trị bet_amount và win_loss của JSON hiện tại
+                    bet_amount_value = bet_amount_from_return_zero
                     
                     # Cập nhật win_loss_token và win_loss_label từ record có return = 0
                     if win_loss_from_zero:
@@ -1746,7 +1977,33 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                                 win_loss_token = "unknown"
                         win_loss_label = win_label_from_token(win_loss_token)
                     
-                    print(f"[HISTORY] Return value = {return_value} != 0, using bet_amount={bet_amount_value}, win_loss={win_loss_token}, column_5 from record with return=0 (record_id={latest_record_with_return_zero.get('record_id')})")
+                    print(f"[HISTORY] Đã tìm thấy JSON HISTORY có return = 0 gần nhất (record_id={latest_record_with_return_zero.get('record_id')}). Đã lấy bet_amount={bet_amount_value} và win_loss={win_loss_token} từ JSON đó đè lên JSON hiện tại (return={return_value}). Các giá trị khác (return, column_5, betting_method, image_type) giữ nguyên từ JSON hiện tại.")
+                else:
+                    # KHÔNG tìm thấy JSON HISTORY có return = 0, không thể đè giá trị
+                    print(f"[HISTORY] WARNING: JSON HISTORY hiện tại có return = {return_value} != 0, nhưng không tìm thấy JSON HISTORY nào có return = 0 cho device {device_name}. Không thể đè bet_amount và win_loss. Đặt bet_amount và win_loss = unknown.")
+                    bet_amount_value = None
+                    win_loss_token = "unknown"
+                    win_loss_label = "Unknown"
+            elif return_value == 0:
+                # return = 0: Tính win_loss từ column_5 hiện tại (không cần quét)
+                dat_value, ket_qua_value = parse_dat_ket_qua(column_5)
+                if dat_value and ket_qua_value:
+                    dat_normalized = normalize_choice(dat_value)
+                    ket_qua_normalized = normalize_choice(ket_qua_value)
+                    if dat_normalized and ket_qua_normalized:
+                        if dat_normalized == ket_qua_normalized:
+                            win_loss_token = "win"
+                        else:
+                            win_loss_token = "loss"
+                
+                win_loss_label = win_label_from_token(win_loss_token)
+                print(f"[HISTORY] Return value = 0, calculating win_loss from column_5: {win_loss_token}")
+            else:
+                # return_value = None: Không parse được return, không áp dụng logic đè
+                print(f"[HISTORY] WARNING: return_value = None (không parse được return value). Không áp dụng logic đè bet_amount và win_loss. Đặt bet_amount và win_loss = unknown.")
+                bet_amount_value = None
+                win_loss_token = "unknown"
+                win_loss_label = "Unknown"
 
             bet_amount_for_calc = bet_amount_value if bet_amount_value is not None else 0
 
@@ -1769,24 +2026,29 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 except Exception as exc:
                     print(f"Error saving cropped HISTORY image: {exc}")
 
-            mobile_betting_service.save_analysis_history(
-                {
-                    "device_name": device_name,
-                    "betting_method": betting_method,
-                    "session_id": session_id_for_db,
-                    "image_type": "HISTORY",
-                    "seconds_remaining": None,
-                    "bet_amount": bet_amount_value,
-                    "actual_bet_amount": bet_amount_value,
-                    "bet_status": None,
-                    "win_loss": win_loss_label,
-                    "multiplier": multiplier,
-                    "image_path": saved_path,
-                    "chatgpt_response": chatgpt_text,
-                    "seconds_region_coords": seconds_region_coords,
-                    "bet_region_coords": bet_amount_region_coords,
-                }
-            )
+            # Nếu return = 0, commit vào DB NGAY LẬP TỨC trước khi trả về response
+            # để request tiếp theo có thể tìm thấy record này
+            if return_value == 0:
+                print(f"[HISTORY] Return value = 0, committing to DB immediately for device {device_name} before returning response")
+                mobile_betting_service.save_analysis_history(
+                    {
+                        "device_name": device_name,
+                        "betting_method": betting_method,
+                        "session_id": session_id_for_db,
+                        "image_type": "HISTORY",
+                        "seconds_remaining": None,
+                        "bet_amount": bet_amount_value,
+                        "actual_bet_amount": bet_amount_value,
+                        "bet_status": None,
+                        "win_loss": win_loss_label,
+                        "multiplier": multiplier,
+                        "image_path": saved_path,
+                        "chatgpt_response": chatgpt_text,
+                        "seconds_region_coords": seconds_region_coords,
+                        "bet_region_coords": bet_amount_region_coords,
+                    }
+                )
+                print(f"[HISTORY] Record with return=0 committed to DB for device {device_name}")
 
             response_data = {
                 "Id": session_id_clean,
@@ -1798,6 +2060,30 @@ CHI tra ve JSON thuan voi khoa "image_type" (khong giai thich, khong dung code b
                 "column_5": column_5,  # Nội dung cột thứ 5 (toàn bộ nội dung đọc được từ ảnh)
                 "return": return_value,  # Thêm return value vào response
             }
+            
+            # Nếu return != 0, commit vào DB sau khi đã tạo response_data
+            # (record return = 0 đã được commit ở trên nếu có)
+            # Lưu ý: Chỉ lưu return_value vào cột return_value khi return_value == 0
+            # Các record có return != 0 không cần lưu return_value (để None)
+            if return_value != 0:
+                mobile_betting_service.save_analysis_history(
+                    {
+                        "device_name": device_name,
+                        "betting_method": betting_method,
+                        "session_id": session_id_for_db,
+                        "image_type": "HISTORY",
+                        "seconds_remaining": None,
+                        "bet_amount": bet_amount_value,
+                        "actual_bet_amount": bet_amount_value,
+                        "bet_status": None,
+                        "win_loss": win_loss_label,
+                        "multiplier": multiplier,
+                        "image_path": saved_path,
+                        "chatgpt_response": chatgpt_text,
+                        "seconds_region_coords": seconds_region_coords,
+                        "bet_region_coords": bet_amount_region_coords,
+                    }
+                )
             
 
         elif is_betting:
@@ -3421,11 +3707,13 @@ async def download_mobile_history_json(record_id: int):
                 filtered_payload[key] = "unknown"
 
         return filtered_payload
-
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Lá»—i táº£i JSON: {exc}")
+    except Exception as e:
+        import traceback
+        print(f"[Get History JSON Error]: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Lỗi khi lấy JSON: {str(e)}")
+
 
 
 @app.get("/api/mobile/device-state/{device_name}")
