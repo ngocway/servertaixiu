@@ -406,6 +406,10 @@ def _build_dashboard_html() -> str:
             <div class=\"toolbar\">
                 <button class=\"primary\" onclick=\"loadHistory(1)\">🔄 Refresh</button>
                 <label>
+                    Time (±10 min)
+                    <input type=\"datetime-local\" id=\"filter-datetime\" onchange=\"loadHistory(1)\" style=\"padding: 6px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;\">
+                </label>
+                <label>
                     Image Type
                     <select id=\"filter-image-type\" onchange=\"loadHistory(1)\">
                         <option value=\"\">All</option>
@@ -437,21 +441,6 @@ def _build_dashboard_html() -> str:
                         <option value=\"100\">100</option>
                     </select>
                     latest records
-                </label>
-                <label>
-                    Date
-                    <select id=\"filter-date\" onchange=\"loadHistory(1)\">
-                        <option value=\"today\">Today</option>
-                        <option value=\"yesterday\" selected>Yesterday</option>
-                        <option value=\"last7days\">Last 7 days</option>
-                        <option value=\"last30days\">Last 30 days</option>
-                        <option value=\"all\">All</option>
-                    </select>
-                </label>
-                <label style=\"display: flex; align-items: center; gap: 8px;\">
-                    Time
-                    <input type=\"time\" id=\"filter-time\" style=\"padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;\" onchange=\"onTimeChange()\" />
-                    <button class=\"secondary small\" onclick=\"resetDateTimeFilter()\" style=\"padding: 6px 12px; font-size: 13px;\">🔄 Reset</button>
                 </label>
             </div>
             <div class=\"table-wrapper\">
@@ -620,13 +609,24 @@ def _build_dashboard_html() -> str:
                     method: 'POST',
                     body: formData
                 });
-                const data = await resp.json();
                 
-                if (resp.ok && data.success) {
-                    statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 600;">✓ Uploaded successfully!</span>';
-                    loadReturnSamplePreview();
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.success) {
+                        statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 600;">✓ Uploaded successfully!</span>';
+                        loadReturnSamplePreview();
+                    } else {
+                        statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${data.detail || 'Upload failed'}</span>`;
+                    }
                 } else {
-                    statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${data.detail || 'Upload failed'}</span>`;
+                    let errorMsg = 'Upload failed';
+                    try {
+                        const data = await resp.json();
+                        errorMsg = data.detail || errorMsg;
+                    } catch {
+                        errorMsg = `Error: ${resp.status} ${resp.statusText}`;
+                    }
+                    statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${errorMsg}</span>`;
                 }
             } catch (error) {
                 statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${error.message}</span>`;
@@ -772,17 +772,6 @@ def _build_dashboard_html() -> str:
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            // Initialize time filter với thời gian hiện tại
-            const now = new Date();
-            const vietnamOffset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
-            const vietnamTime = new Date(now.getTime() + vietnamOffset);
-            const hours = String(vietnamTime.getUTCHours()).padStart(2, '0');
-            const minutes = String(vietnamTime.getUTCMinutes()).padStart(2, '0');
-            const timeInput = document.getElementById('filter-time');
-            if (timeInput) {
-                timeInput.value = `${hours}:${minutes}`;
-            }
-            
             loadHistory();
             loadBettingSamplePreview();
             loadHistorySamplePreview();
@@ -847,45 +836,15 @@ def _build_dashboard_html() -> str:
             }
         }
 
-        // Hàm xử lý khi user thay đổi Time thủ công
-        function onTimeChange() {
-            // Xóa flag filter 120 phút khi user thay đổi thủ công
-            const timeInput = document.getElementById('filter-time');
-            timeInput.removeAttribute('data-filter-120min');
-            loadHistory(1);
-        }
-
-        // Hàm reset Date và Time filter - hiển thị records trong 120 phút từ thời gian hiện tại
-        function resetDateTimeFilter() {
-            // Reset Date về "All" để không giới hạn theo ngày
-            document.getElementById('filter-date').value = 'all';
-            
-            // Reset Time về thời gian hiện tại (UTC+7)
-            const now = new Date();
-            const vietnamOffset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
-            const vietnamTime = new Date(now.getTime() + vietnamOffset);
-            const hours = String(vietnamTime.getUTCHours()).padStart(2, '0');
-            const minutes = String(vietnamTime.getUTCMinutes()).padStart(2, '0');
-            const timeInput = document.getElementById('filter-time');
-            timeInput.value = `${hours}:${minutes}`;
-            
-            // Đánh dấu rằng cần filter trong 120 phút
-            timeInput.setAttribute('data-filter-120min', 'true');
-            
-            // Reload history với filter mới
-            loadHistory(1);
-        }
-
         async function loadHistory(page = 1) {
             currentPage = page;
             const limit = parseInt(document.getElementById('history-limit').value);
+            const filterDateTime = document.getElementById('filter-datetime').value;
             const filterImageType = document.getElementById('filter-image-type').value;
             const filterDevice = document.getElementById('filter-device').value;
             const filterResult = document.getElementById('filter-result').value;
-            const filterDate = document.getElementById('filter-date').value;
-            const filterTime = document.getElementById('filter-time').value;
             const tbody = document.getElementById('history-body');
-            tbody.innerHTML = '<tr><td colspan="8" class="empty">Äang táº£i dá»¯ liá»‡u...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="empty">Đang tải dữ liệu...</td></tr>';
             try {
                 // Lấy tất cả data từ server (không paginate ở server vì cần filter ở client)
                 const resp = await fetch(`/api/mobile/history?limit=10000&page=1`);
@@ -921,6 +880,58 @@ def _build_dashboard_html() -> str:
                 // Filter data theo các giá trị đã chọn
                 filteredHistoryData = allHistoryData;
                 
+                // Filter theo thời gian cụ thể (±10 phút)
+                if (filterDateTime) {
+                    filteredHistoryData = filteredHistoryData.filter(record => {
+                        if (!record.created_at) return false;
+                        
+                        try {
+                            // Parse created_at từ database
+                            let dateStr = String(record.created_at);
+                            if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
+                                dateStr = dateStr.replace(' ', 'T') + 'Z';
+                            }
+                            const recordDate = new Date(dateStr);
+                            
+                            if (isNaN(recordDate.getTime())) return false;
+                            
+                            // Convert record sang UTC+7 (Vietnam timezone)
+                            const vietnamOffset = 7 * 60 * 60 * 1000;
+                            const recordVietnamDate = new Date(recordDate.getTime() + vietnamOffset);
+                            
+                            // Parse filter datetime
+                            // datetime-local input trả về format: "YYYY-MM-DDTHH:mm" (ví dụ: "2024-11-27T11:05")
+                            // Coi giá trị này là Vietnam time (UTC+7)
+                            const filterDateTimeStr = filterDateTime;
+                            
+                            // Extract components từ string
+                            const [datePart, timePart] = filterDateTimeStr.split('T');
+                            if (!datePart || !timePart) return false;
+                            
+                            const [year, month, day] = datePart.split('-').map(Number);
+                            const [hour, minute] = timePart.split(':').map(Number);
+                            
+                            // Tạo Date object UTC từ các giá trị trên, coi như đang ở UTC+7
+                            // Để có UTC, cần trừ 7 giờ
+                            const filterDateUTC = new Date(Date.UTC(year, month - 1, day, hour, minute, 0) - vietnamOffset);
+                            
+                            if (isNaN(filterDateUTC.getTime())) return false;
+                            
+                            // Record từ DB đã ở UTC
+                            const recordUTC = recordDate;
+                            
+                            // Tính khoảng cách thời gian (milliseconds) - cả hai đều ở UTC
+                            const timeDiff = Math.abs(recordUTC.getTime() - filterDateUTC.getTime());
+                            const tenMinutesInMs = 10 * 60 * 1000; // 10 phút = 600000 milliseconds
+                            
+                            // Chỉ giữ lại records trong vòng ±10 phút
+                            return timeDiff <= tenMinutesInMs;
+                        } catch (e) {
+                            return false;
+                        }
+                    });
+                }
+                
                 if (filterImageType) {
                     filteredHistoryData = filteredHistoryData.filter(record => record.image_type === filterImageType);
                 }
@@ -937,126 +948,6 @@ def _build_dashboard_html() -> str:
                             return !recordResult || recordResult === '-' || recordResult === 'Unknown';
                         }
                         return recordResult === filterResult;
-                    });
-                }
-
-                // Filter by Date
-                if (filterDate && filterDate !== 'all') {
-                    const now = new Date();
-                    const vietnamOffset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
-                    const vietnamNow = new Date(now.getTime() + vietnamOffset);
-                    let startDate = new Date(vietnamNow);
-                    startDate.setUTCHours(0, 0, 0, 0);
-                    
-                    if (filterDate === 'today') {
-                        // Filter records from today (00:00:00 to now)
-                        filteredHistoryData = filteredHistoryData.filter(record => {
-                            try {
-                                let dateStr = String(record.created_at);
-                                if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
-                                    dateStr = dateStr.replace(' ', 'T') + 'Z';
-                                }
-                                const recordDate = new Date(dateStr);
-                                if (isNaN(recordDate.getTime())) return false;
-                                const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
-                                return recordVietnamTime >= startDate && recordVietnamTime <= vietnamNow;
-                            } catch (e) {
-                                return false;
-                            }
-                        });
-                    } else if (filterDate === 'yesterday') {
-                        // Filter records from yesterday
-                        startDate.setUTCDate(startDate.getUTCDate() - 1);
-                        const endDate = new Date(startDate);
-                        endDate.setUTCDate(endDate.getUTCDate() + 1);
-                        filteredHistoryData = filteredHistoryData.filter(record => {
-                            try {
-                                let dateStr = String(record.created_at);
-                                if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
-                                    dateStr = dateStr.replace(' ', 'T') + 'Z';
-                                }
-                                const recordDate = new Date(dateStr);
-                                if (isNaN(recordDate.getTime())) return false;
-                                const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
-                                return recordVietnamTime >= startDate && recordVietnamTime < endDate;
-                            } catch (e) {
-                                return false;
-                            }
-                        });
-                    } else if (filterDate === 'last7days') {
-                        startDate.setUTCDate(startDate.getUTCDate() - 7);
-                        filteredHistoryData = filteredHistoryData.filter(record => {
-                            try {
-                                let dateStr = String(record.created_at);
-                                if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
-                                    dateStr = dateStr.replace(' ', 'T') + 'Z';
-                                }
-                                const recordDate = new Date(dateStr);
-                                if (isNaN(recordDate.getTime())) return false;
-                                const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
-                                return recordVietnamTime >= startDate && recordVietnamTime <= vietnamNow;
-                            } catch (e) {
-                                return false;
-                            }
-                        });
-                    } else if (filterDate === 'last30days') {
-                        startDate.setUTCDate(startDate.getUTCDate() - 30);
-                        filteredHistoryData = filteredHistoryData.filter(record => {
-                            try {
-                                let dateStr = String(record.created_at);
-                                if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
-                                    dateStr = dateStr.replace(' ', 'T') + 'Z';
-                                }
-                                const recordDate = new Date(dateStr);
-                                if (isNaN(recordDate.getTime())) return false;
-                                const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
-                                return recordVietnamTime >= startDate && recordVietnamTime <= vietnamNow;
-                            } catch (e) {
-                                return false;
-                            }
-                        });
-                    }
-                }
-
-                // Filter by Time
-                if (filterTime) {
-                    const timeInput = document.getElementById('filter-time');
-                    const filter120Min = timeInput.getAttribute('data-filter-120min') === 'true';
-                    const [hours, minutes] = filterTime.split(':').map(Number);
-                    
-                    filteredHistoryData = filteredHistoryData.filter(record => {
-                        try {
-                            let dateStr = String(record.created_at);
-                            if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
-                                dateStr = dateStr.replace(' ', 'T') + 'Z';
-                            }
-                            const recordDate = new Date(dateStr);
-                            if (isNaN(recordDate.getTime())) return false;
-                            const vietnamOffset = 7 * 60 * 60 * 1000;
-                            const recordVietnamTime = new Date(recordDate.getTime() + vietnamOffset);
-                            const recordHours = recordVietnamTime.getUTCHours();
-                            const recordMinutes = recordVietnamTime.getUTCMinutes();
-                            
-                            if (filter120Min) {
-                                // Filter records trong 120 phút từ thời gian hiện tại
-                                // Tính thời gian hiện tại và thời gian 120 phút trước đó
-                                const now = new Date();
-                                const vietnamNow = new Date(now.getTime() + vietnamOffset);
-                                const startDate = new Date(vietnamNow);
-                                startDate.setUTCMinutes(startDate.getUTCMinutes() - 120);
-                                
-                                // Kiểm tra record có nằm trong khoảng [startDate, vietnamNow]
-                                return recordVietnamTime >= startDate && recordVietnamTime <= vietnamNow;
-                            } else {
-                                // Filter records sau thời gian đã chọn (logic cũ)
-                                if (recordHours > hours || (recordHours === hours && recordMinutes >= minutes)) {
-                                    return true;
-                                }
-                                return false;
-                            }
-                        } catch (e) {
-                            return false;
-                        }
                     });
                 }
 
@@ -3499,6 +3390,48 @@ async def get_sample_place_bet_button():
         sample_path = Path("samples/sample_place_bet_button.jpg")
         if not sample_path.exists():
             raise HTTPException(status_code=404, detail="Nút Đặt Cược sample image not found")
+        
+        return FileResponse(sample_path, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting sample: {exc}")
+
+
+@app.post("/api/mobile/return-sample/upload")
+async def upload_return_sample(file: UploadFile = File(...)):
+    """Upload or replace RETURN sample image"""
+    try:
+        samples_dir = Path("samples")
+        samples_dir.mkdir(exist_ok=True)
+        
+        sample_path = samples_dir / "return_sample.jpg"
+        
+        # Xóa file cũ nếu tồn tại để đảm bảo replace
+        if sample_path.exists():
+            sample_path.unlink()
+        
+        image_data = await file.read()
+        with open(sample_path, "wb") as f:
+            f.write(image_data)
+            f.flush()
+        
+        return {
+            "success": True,
+            "message": "Return sample image uploaded successfully",
+            "path": str(sample_path)
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
+
+
+@app.get("/api/mobile/return-sample")
+async def get_return_sample():
+    """Get RETURN sample image"""
+    try:
+        sample_path = Path("samples/return_sample.jpg")
+        if not sample_path.exists():
+            raise HTTPException(status_code=404, detail="Return sample image not found")
         
         return FileResponse(sample_path, media_type="image/jpeg")
     except HTTPException:
