@@ -450,7 +450,7 @@ def _build_dashboard_html() -> str:
                 </label>
                 <label style=\"display: flex; align-items: center; gap: 8px;\">
                     Time
-                    <input type=\"time\" id=\"filter-time\" style=\"padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;\" onchange=\"loadHistory(1)\" />
+                    <input type=\"time\" id=\"filter-time\" style=\"padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;\" onchange=\"onTimeChange()\" />
                     <button class=\"secondary small\" onclick=\"resetDateTimeFilter()\" style=\"padding: 6px 12px; font-size: 13px;\">🔄 Reset</button>
                 </label>
             </div>
@@ -847,10 +847,18 @@ def _build_dashboard_html() -> str:
             }
         }
 
-        // Hàm reset Date và Time filter về ngày và thời gian hiện tại
+        // Hàm xử lý khi user thay đổi Time thủ công
+        function onTimeChange() {
+            // Xóa flag filter 120 phút khi user thay đổi thủ công
+            const timeInput = document.getElementById('filter-time');
+            timeInput.removeAttribute('data-filter-120min');
+            loadHistory(1);
+        }
+
+        // Hàm reset Date và Time filter - hiển thị records trong 120 phút từ thời gian hiện tại
         function resetDateTimeFilter() {
-            // Reset Date về "Today"
-            document.getElementById('filter-date').value = 'today';
+            // Reset Date về "All" để không giới hạn theo ngày
+            document.getElementById('filter-date').value = 'all';
             
             // Reset Time về thời gian hiện tại (UTC+7)
             const now = new Date();
@@ -858,7 +866,11 @@ def _build_dashboard_html() -> str:
             const vietnamTime = new Date(now.getTime() + vietnamOffset);
             const hours = String(vietnamTime.getUTCHours()).padStart(2, '0');
             const minutes = String(vietnamTime.getUTCMinutes()).padStart(2, '0');
-            document.getElementById('filter-time').value = `${hours}:${minutes}`;
+            const timeInput = document.getElementById('filter-time');
+            timeInput.value = `${hours}:${minutes}`;
+            
+            // Đánh dấu rằng cần filter trong 120 phút
+            timeInput.setAttribute('data-filter-120min', 'true');
             
             // Reload history với filter mới
             loadHistory(1);
@@ -1006,9 +1018,12 @@ def _build_dashboard_html() -> str:
                     }
                 }
 
-                // Filter by Time (if time is set, filter records after that time on the selected date)
+                // Filter by Time
                 if (filterTime) {
+                    const timeInput = document.getElementById('filter-time');
+                    const filter120Min = timeInput.getAttribute('data-filter-120min') === 'true';
                     const [hours, minutes] = filterTime.split(':').map(Number);
+                    
                     filteredHistoryData = filteredHistoryData.filter(record => {
                         try {
                             let dateStr = String(record.created_at);
@@ -1022,11 +1037,23 @@ def _build_dashboard_html() -> str:
                             const recordHours = recordVietnamTime.getUTCHours();
                             const recordMinutes = recordVietnamTime.getUTCMinutes();
                             
-                            // Compare time: record time should be >= filter time
-                            if (recordHours > hours || (recordHours === hours && recordMinutes >= minutes)) {
-                                return true;
+                            if (filter120Min) {
+                                // Filter records trong 120 phút từ thời gian hiện tại
+                                // Tính thời gian hiện tại và thời gian 120 phút trước đó
+                                const now = new Date();
+                                const vietnamNow = new Date(now.getTime() + vietnamOffset);
+                                const startDate = new Date(vietnamNow);
+                                startDate.setUTCMinutes(startDate.getUTCMinutes() - 120);
+                                
+                                // Kiểm tra record có nằm trong khoảng [startDate, vietnamNow]
+                                return recordVietnamTime >= startDate && recordVietnamTime <= vietnamNow;
+                            } else {
+                                // Filter records sau thời gian đã chọn (logic cũ)
+                                if (recordHours > hours || (recordHours === hours && recordMinutes >= minutes)) {
+                                    return true;
+                                }
+                                return false;
                             }
-                            return false;
                         } catch (e) {
                             return false;
                         }
