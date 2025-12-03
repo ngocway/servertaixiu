@@ -111,6 +111,12 @@ class MobileBettingService:
             cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN actual_image_height INTEGER")
         if 'azure_ocr_response' not in existing_columns:
             cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN azure_ocr_response TEXT")
+        if 'used_return_sample' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN used_return_sample BOOLEAN DEFAULT 0")
+        if 'return_sample_cropped_image_path' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN return_sample_cropped_image_path TEXT")
+        if 'return_sample_chatgpt_response' not in existing_columns:
+            cursor.execute("ALTER TABLE mobile_analysis_history ADD COLUMN return_sample_chatgpt_response TEXT")
         
         # Table lưu chi tiết verification logs
         cursor.execute("""
@@ -327,8 +333,8 @@ class MobileBettingService:
              button_10k_coords, button_10k_error, button_50k_coords, button_50k_error, button_bet_coords, button_bet_error,
              button_place_bet_coords, button_place_bet_error,
              device_real_width, device_real_height, screenshot_width, screenshot_height, actual_image_width, actual_image_height,
-             azure_ocr_response)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             azure_ocr_response, used_return_sample, return_sample_cropped_image_path, return_sample_chatgpt_response)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             record.get('device_name'),
             record.get('betting_method'),
@@ -360,7 +366,10 @@ class MobileBettingService:
             record.get('screenshot_height'),
             record.get('actual_image_width'),
             record.get('actual_image_height'),
-            record.get('azure_ocr_response')
+            record.get('azure_ocr_response'),
+            1 if record.get('used_return_sample') else 0,
+            record.get('return_sample_cropped_image_path'),
+            record.get('return_sample_chatgpt_response')
         ))
         
         conn.commit()
@@ -533,7 +542,8 @@ class MobileBettingService:
         cursor.execute("""
             SELECT id, device_name, betting_method, session_id, image_type,
                    seconds_remaining, bet_amount, actual_bet_amount, bet_status, win_loss, multiplier,
-                   image_path, seconds_region_coords, bet_region_coords, created_at
+                   image_path, seconds_region_coords, bet_region_coords, created_at,
+                   used_return_sample, return_sample_cropped_image_path, chatgpt_response
             FROM mobile_analysis_history
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
@@ -544,6 +554,53 @@ class MobileBettingService:
         
         history = []
         for row in rows:
+            # Parse return value từ chatgpt_response nếu có
+            return_value = None
+            chatgpt_response = row[17] if len(row) > 17 else None
+            if chatgpt_response and row[4] == "HISTORY":  # image_type == "HISTORY"
+                try:
+                    import json
+                    import re
+                    def parse_json_payload(raw_text: str):
+                        if not raw_text:
+                            return {}
+                        cleaned = raw_text.strip()
+                        start = cleaned.find('{')
+                        end = cleaned.rfind('}')
+                        if start != -1 and end != -1 and end >= start:
+                            cleaned = cleaned[start : end + 1]
+                        try:
+                            return json.loads(cleaned)
+                        except:
+                            return {}
+                    
+                    parsed = parse_json_payload(chatgpt_response)
+                    hoan_tra_str = parsed.get("hoan_tra") or parsed.get("Hoàn trả") or parsed.get("return")
+                    if hoan_tra_str:
+                        try:
+                            hoan_tra_clean = str(hoan_tra_str).replace(",", "").replace(" ", "").strip()
+                            if hoan_tra_clean.isdigit():
+                                return_value = int(hoan_tra_clean)
+                        except:
+                            pass
+                    
+                    if return_value is None:
+                        hoan_tra_patterns = [
+                            r'"hoan_tra"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                            r'"Hoàn trả"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                            r'"return"\s*:\s*"?(\d+(?:,\d{3})*)"?',
+                            r'Hoàn trả.*?(\d{1,3}(?:,\d{3})*)',
+                        ]
+                        for pattern in hoan_tra_patterns:
+                            hoan_tra_match = re.search(pattern, chatgpt_response, re.IGNORECASE)
+                            if hoan_tra_match:
+                                hoan_tra_str = hoan_tra_match.group(1).replace(",", "").strip()
+                                if hoan_tra_str.isdigit():
+                                    return_value = int(hoan_tra_str)
+                                    break
+                except:
+                    pass
+            
             history.append({
                 'id': row[0],
                 'device_name': row[1],
@@ -559,7 +616,9 @@ class MobileBettingService:
                 'image_path': row[11],
                 'seconds_region_coords': row[12],
                 'bet_region_coords': row[13],
-                'created_at': row[14]
+                'created_at': row[14],
+                'used_return_sample': bool(row[15]) if len(row) > 15 else False,
+                'return': return_value
             })
         
         return history, total_count

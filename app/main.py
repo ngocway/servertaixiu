@@ -406,10 +406,6 @@ def _build_dashboard_html() -> str:
             <div class=\"toolbar\">
                 <button class=\"primary\" onclick=\"loadHistory(1)\">🔄 Refresh</button>
                 <label>
-                    Time (±10 min)
-                    <input type=\"datetime-local\" id=\"filter-datetime\" onchange=\"loadHistory(1)\" style=\"padding: 6px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;\">
-                </label>
-                <label>
                     Image Type
                     <select id=\"filter-image-type\" onchange=\"loadHistory(1)\">
                         <option value=\"\">All</option>
@@ -609,24 +605,13 @@ def _build_dashboard_html() -> str:
                     method: 'POST',
                     body: formData
                 });
+                const data = await resp.json();
                 
-                if (resp.ok) {
-                    const data = await resp.json();
-                    if (data.success) {
-                        statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 600;">✓ Uploaded successfully!</span>';
-                        loadReturnSamplePreview();
-                    } else {
-                        statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${data.detail || 'Upload failed'}</span>`;
-                    }
+                if (resp.ok && data.success) {
+                    statusDiv.innerHTML = '<span style="color: #10b981; font-weight: 600;">✓ Uploaded successfully!</span>';
+                    loadReturnSamplePreview();
                 } else {
-                    let errorMsg = 'Upload failed';
-                    try {
-                        const data = await resp.json();
-                        errorMsg = data.detail || errorMsg;
-                    } catch {
-                        errorMsg = `Error: ${resp.status} ${resp.statusText}`;
-                    }
-                    statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${errorMsg}</span>`;
+                    statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${data.detail || 'Upload failed'}</span>`;
                 }
             } catch (error) {
                 statusDiv.innerHTML = `<span style="color: #ef4444;">Error: ${error.message}</span>`;
@@ -839,12 +824,11 @@ def _build_dashboard_html() -> str:
         async function loadHistory(page = 1) {
             currentPage = page;
             const limit = parseInt(document.getElementById('history-limit').value);
-            const filterDateTime = document.getElementById('filter-datetime').value;
             const filterImageType = document.getElementById('filter-image-type').value;
             const filterDevice = document.getElementById('filter-device').value;
             const filterResult = document.getElementById('filter-result').value;
             const tbody = document.getElementById('history-body');
-            tbody.innerHTML = '<tr><td colspan="8" class="empty">Đang tải dữ liệu...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="empty">Äang táº£i dá»¯ liá»‡u...</td></tr>';
             try {
                 // Lấy tất cả data từ server (không paginate ở server vì cần filter ở client)
                 const resp = await fetch(`/api/mobile/history?limit=10000&page=1`);
@@ -879,58 +863,6 @@ def _build_dashboard_html() -> str:
 
                 // Filter data theo các giá trị đã chọn
                 filteredHistoryData = allHistoryData;
-                
-                // Filter theo thời gian cụ thể (±10 phút)
-                if (filterDateTime) {
-                    filteredHistoryData = filteredHistoryData.filter(record => {
-                        if (!record.created_at) return false;
-                        
-                        try {
-                            // Parse created_at từ database
-                            let dateStr = String(record.created_at);
-                            if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
-                                dateStr = dateStr.replace(' ', 'T') + 'Z';
-                            }
-                            const recordDate = new Date(dateStr);
-                            
-                            if (isNaN(recordDate.getTime())) return false;
-                            
-                            // Convert record sang UTC+7 (Vietnam timezone)
-                            const vietnamOffset = 7 * 60 * 60 * 1000;
-                            const recordVietnamDate = new Date(recordDate.getTime() + vietnamOffset);
-                            
-                            // Parse filter datetime
-                            // datetime-local input trả về format: "YYYY-MM-DDTHH:mm" (ví dụ: "2024-11-27T11:05")
-                            // Coi giá trị này là Vietnam time (UTC+7)
-                            const filterDateTimeStr = filterDateTime;
-                            
-                            // Extract components từ string
-                            const [datePart, timePart] = filterDateTimeStr.split('T');
-                            if (!datePart || !timePart) return false;
-                            
-                            const [year, month, day] = datePart.split('-').map(Number);
-                            const [hour, minute] = timePart.split(':').map(Number);
-                            
-                            // Tạo Date object UTC từ các giá trị trên, coi như đang ở UTC+7
-                            // Để có UTC, cần trừ 7 giờ
-                            const filterDateUTC = new Date(Date.UTC(year, month - 1, day, hour, minute, 0) - vietnamOffset);
-                            
-                            if (isNaN(filterDateUTC.getTime())) return false;
-                            
-                            // Record từ DB đã ở UTC
-                            const recordUTC = recordDate;
-                            
-                            // Tính khoảng cách thời gian (milliseconds) - cả hai đều ở UTC
-                            const timeDiff = Math.abs(recordUTC.getTime() - filterDateUTC.getTime());
-                            const tenMinutesInMs = 10 * 60 * 1000; // 10 phút = 600000 milliseconds
-                            
-                            // Chỉ giữ lại records trong vòng ±10 phút
-                            return timeDiff <= tenMinutesInMs;
-                        } catch (e) {
-                            return false;
-                        }
-                    });
-                }
                 
                 if (filterImageType) {
                     filteredHistoryData = filteredHistoryData.filter(record => record.image_type === filterImageType);
@@ -3390,48 +3322,6 @@ async def get_sample_place_bet_button():
         sample_path = Path("samples/sample_place_bet_button.jpg")
         if not sample_path.exists():
             raise HTTPException(status_code=404, detail="Nút Đặt Cược sample image not found")
-        
-        return FileResponse(sample_path, media_type="image/jpeg")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error getting sample: {exc}")
-
-
-@app.post("/api/mobile/return-sample/upload")
-async def upload_return_sample(file: UploadFile = File(...)):
-    """Upload or replace RETURN sample image"""
-    try:
-        samples_dir = Path("samples")
-        samples_dir.mkdir(exist_ok=True)
-        
-        sample_path = samples_dir / "return_sample.jpg"
-        
-        # Xóa file cũ nếu tồn tại để đảm bảo replace
-        if sample_path.exists():
-            sample_path.unlink()
-        
-        image_data = await file.read()
-        with open(sample_path, "wb") as f:
-            f.write(image_data)
-            f.flush()
-        
-        return {
-            "success": True,
-            "message": "Return sample image uploaded successfully",
-            "path": str(sample_path)
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error uploading sample: {exc}")
-
-
-@app.get("/api/mobile/return-sample")
-async def get_return_sample():
-    """Get RETURN sample image"""
-    try:
-        sample_path = Path("samples/return_sample.jpg")
-        if not sample_path.exists():
-            raise HTTPException(status_code=404, detail="Return sample image not found")
         
         return FileResponse(sample_path, media_type="image/jpeg")
     except HTTPException:
